@@ -1,61 +1,75 @@
-//
-//  ContentView.swift
-//  ble_thermometer
-//
-//  Created by Mohamed Djemai on 2025-03-30.
-//
-
 import SwiftUI
-import SwiftData
+import CoreBluetooth
 
 struct ContentView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
+    @ObservedObject var bleManager = BLEManager()
+    @State private var isScanning = false
 
     var body: some View {
-        NavigationSplitView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
-                    } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
+        NavigationView {
+            VStack {
+                List {
+                    ForEach(bleManager.peripherals, id: \.identifier) { peripheral in
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(peripheral.name ?? "Unknown Device")
+                                if peripheral.state == .connected {
+                                    Text("Connected")
+                                        .foregroundColor(.green)
+                                } else {
+                                    Text("Disconnected")
+                                        .foregroundColor(.red)
+                                }
+                            }
+                            Spacer()
+                            Button(action: {
+                                if peripheral.state == .connected {
+                                    bleManager.disconnect(peripheral: peripheral)
+                                } else {
+                                    bleManager.connect(peripheral: peripheral)
+                                }
+                            }) {
+                                Text(peripheral.state == .connected ? "Disconnect" : "Connect")
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(!bleManager.isBluetoothEnabled)
+                            NavigationLink(destination: DeviceDetailView(bleManager: bleManager, peripheral: peripheral)) {
+                                Image(systemName: "arrow.right.circle")
+                                    .font(.title3)
+                            }
+                        }
+                        .padding(.vertical, 4)
                     }
                 }
-                .onDelete(perform: deleteItems)
-            }
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    EditButton()
-                }
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
+
+                Button(action: {
+                    if isScanning {
+                        bleManager.stopScan()
+                    } else {
+                        bleManager.startScan()
                     }
+                    isScanning.toggle()
+                }) {
+                    Text(isScanning ? "Stop Scan" : "Start Scan")
+                }
+                .padding()
+                .disabled(!bleManager.isBluetoothEnabled)
+                
+                if !bleManager.isBluetoothEnabled {
+                    Text("Bluetooth is disabled. Please enable it in settings.")
+                        .foregroundColor(.gray)
+                        .padding()
                 }
             }
-        } detail: {
-            Text("Select an item")
-        }
-    }
-
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
-        }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            for index in offsets {
-                modelContext.delete(items[index])
+            .navigationTitle("BLE Devices")
+            .onAppear {
+                bleManager.startScan()
+                isScanning = true
+            }
+            .onDisappear {
+                bleManager.stopScan()
+                isScanning = false
             }
         }
     }
-}
-
-#Preview {
-    ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
 }
