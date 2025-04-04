@@ -91,6 +91,15 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             print("Peripheral is not connected. Cannot set notify value.")
         }
     }
+    
+    func writeValue(for characteristic: CBCharacteristic, of peripheral: CBPeripheral, value: Data) {
+        if peripheral.state == .connected {
+            peripheral.delegate = self
+            peripheral.writeValue(value, for: characteristic, type: .withResponse)
+        } else {
+            print("Peripheral is not connected. Cannot write value.")
+        }
+    }
 
     // CBCentralManagerDelegate methods
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
@@ -107,8 +116,11 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
-        if !peripherals.contains(peripheral) {
-            peripherals.append(peripheral)
+        // Check if the peripheral's name contains "Example"
+        if let name = peripheral.name, name.contains("Example") {
+            if !peripherals.contains(peripheral) {
+                peripherals.append(peripheral)
+            }
         }
     }
 

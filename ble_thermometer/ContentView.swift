@@ -2,74 +2,26 @@ import SwiftUI
 import CoreBluetooth
 
 struct ContentView: View {
-    @ObservedObject var bleManager = BLEManager()
-    @State private var isScanning = false
+    @State private var selectedTab: Int = 0
+    @ObservedObject var bleManager = BLEManager() // Create a single instance
 
     var body: some View {
-        NavigationView {
-            VStack {
-                List {
-                    ForEach(bleManager.peripherals, id: \.identifier) { peripheral in
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(peripheral.name ?? "Unknown Device")
-                                if peripheral.state == .connected {
-                                    Text("Connected")
-                                        .foregroundColor(.green)
-                                } else {
-                                    Text("Disconnected")
-                                        .foregroundColor(.red)
-                                }
-                            }
-                            Spacer()
-                            Button(action: {
-                                if peripheral.state == .connected {
-                                    bleManager.disconnect(peripheral: peripheral)
-                                } else {
-                                    bleManager.connect(peripheral: peripheral)
-                                }
-                            }) {
-                                Text(peripheral.state == .connected ? "Disconnect" : "Connect")
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(!bleManager.isBluetoothEnabled)
-                            NavigationLink(destination: DeviceDetailView(bleManager: bleManager, peripheral: peripheral)) {
-                                Image(systemName: "arrow.right.circle")
-                                    .font(.title3)
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
+        TabView(selection: $selectedTab) {
+            HomeView(bleManager: bleManager, selectedTab: $selectedTab) // Pass the instance
+                .tabItem {
+                    Label("Home", systemImage: "house")
                 }
-
-                Button(action: {
-                    if isScanning {
-                        bleManager.stopScan()
-                    } else {
-                        bleManager.startScan()
-                    }
-                    isScanning.toggle()
-                }) {
-                    Text(isScanning ? "Stop Scan" : "Start Scan")
+                .tag(0)
+            SettingsView(bleManager: bleManager) // Pass the same instance
+                .tabItem {
+                    Label("Settings", systemImage: "gear")
                 }
-                .padding()
-                .disabled(!bleManager.isBluetoothEnabled)
-                
-                if !bleManager.isBluetoothEnabled {
-                    Text("Bluetooth is disabled. Please enable it in settings.")
-                        .foregroundColor(.gray)
-                        .padding()
+                .tag(1)
+            ProfileView()
+                .tabItem {
+                    Label("Profile", systemImage: "person.crop.circle")
                 }
-            }
-            .navigationTitle("BLE Devices")
-            .onAppear {
-                bleManager.startScan()
-                isScanning = true
-            }
-            .onDisappear {
-                bleManager.stopScan()
-                isScanning = false
-            }
+                .tag(2)
         }
     }
 }
