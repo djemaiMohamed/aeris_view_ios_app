@@ -5,14 +5,4 @@
 //  Created by Mohamed Djemai on 2025-03-30.
 //
 
-import Foundation
-import SwiftData
-
-@Model
-final class Item {
-    var timestamp: Date
-    
-    init(timestamp: Date) {
-        self.timestamp = timestamp
-    }
-}
+// This file is kept for compatibility but the actual data models are now in SharedTypes.swift

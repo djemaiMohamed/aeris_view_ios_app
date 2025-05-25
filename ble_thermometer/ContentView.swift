@@ -1,27 +1,65 @@
 import SwiftUI
+import SwiftData
 import CoreBluetooth
 
 struct ContentView: View {
-    @State private var selectedTab: Int = 0
-    @ObservedObject var bleManager = BLEManager() // Create a single instance
-
+    @Environment(\.modelContext) private var modelContext
+    @StateObject private var bleManager = BLEManager()
+    @Query private var userSettings: [UserSettings]
+    @State private var showOnboarding = false
+    @State private var selectedTab = 0
+    
+    var currentSettings: UserSettings {
+        userSettings.first ?? UserSettings()
+    }
+    
     var body: some View {
-        TabView(selection: $selectedTab) {
-            HomeView(bleManager: bleManager, selectedTab: $selectedTab) // Pass the instance
-                .tabItem {
-                    Label("Home", systemImage: "house")
+        Group {
+            if !bleManager.isBonded && !bleManager.isBluetoothEnabled {
+                OnboardingView(bleManager: bleManager)
+            } else if !bleManager.isBonded {
+                DevicePairingView(bleManager: bleManager)
+            } else {
+                TabView(selection: $selectedTab) {
+                    HomeView(bleManager: bleManager)
+                        .tabItem {
+                            Image(systemName: "house.fill")
+                            Text("Home")
+                        }
+                        .tag(0)
+                    
+                    HistoryView()
+                        .tabItem {
+                            Image(systemName: "chart.line.uptrend.xyaxis")
+                            Text("History")
+                        }
+                        .tag(1)
+                    
+                    SettingsView(bleManager: bleManager)
+                        .tabItem {
+                            Image(systemName: "gearshape.fill")
+                            Text("Settings")
+                        }
+                        .tag(2)
+                    
+                    AccountView()
+                        .tabItem {
+                            Image(systemName: "person.fill")
+                            Text("Account")
+                        }
+                        .tag(3)
                 }
-                .tag(0)
-            SettingsView(bleManager: bleManager) // Pass the same instance
-                .tabItem {
-                    Label("Settings", systemImage: "gear")
-                }
-                .tag(1)
-            ProfileView()
-                .tabItem {
-                    Label("Profile", systemImage: "person.crop.circle")
-                }
-                .tag(2)
+                .accentColor(.blue)
+            }
+        }
+        .onAppear {
+            bleManager.setModelContext(modelContext)
+            
+            // Create default settings if none exist
+            if userSettings.isEmpty {
+                let defaultSettings = UserSettings()
+                modelContext.insert(defaultSettings)
+            }
         }
     }
 }
