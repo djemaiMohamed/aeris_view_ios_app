@@ -32,9 +32,10 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     
     // MARK: - Notification Properties
     private var lastNotificationTime: Date?
-    private var poorAirQualityStartTime: Date?
+    private var currentLevelStartTime: Date?
+    private var previousAirQualityLevel: AirQualityLevel?
     private let notificationCooldownPeriod: TimeInterval = 300 // 5 minutes
-    private let poorAirQualityThreshold: TimeInterval = 300 // 5 minutes
+    private let levelChangeThreshold: TimeInterval = 300 // 5 minutes
 
     // Replace these UUIDs with your actual service and characteristic UUIDs
     let targetServiceUUID = CBUUID(string: "1809")
@@ -365,33 +366,56 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     
     // MARK: - Air Quality Monitoring
     private func updateAirQualityLevel() {
-        airQualityLevel = getAirQualityLevel(co2: co2Value)
+        let newLevel = getAirQualityLevel(co2: co2Value)
+        
+        // Check if level has changed
+        if previousAirQualityLevel != newLevel {
+            previousAirQualityLevel = airQualityLevel
+            airQualityLevel = newLevel
+            currentLevelStartTime = Date()
+            print("Air quality level changed to: \(newLevel.rawValue)")
+        } else {
+            airQualityLevel = newLevel
+        }
+        
         lastUpdateTime = Date()
     }
     
     private func handleAirQualityNotifications() {
-        // Check if air quality is poor and notification cooldown has passed
-        if airQualityLevel == .poor || airQualityLevel == .veryPoor {
-            if poorAirQualityStartTime == nil {
-                poorAirQualityStartTime = Date()
-            }
-            
-            let timeSincePoorAirQuality = Date().timeIntervalSince(poorAirQualityStartTime ?? Date())
-            let timeSinceLastNotification = lastNotificationTime?.timeIntervalSinceNow ?? -notificationCooldownPeriod
-            
-            if timeSincePoorAirQuality > poorAirQualityThreshold &&
-               abs(timeSinceLastNotification) > notificationCooldownPeriod {
-                scheduleAirQualityNotification()
-            }
-        } else {
-            poorAirQualityStartTime = nil
+        // Check if user has notifications enabled
+        guard let settings = userSettings, settings.notificationsEnabled else { return }
+        
+        // Check if we have a level change and enough time has passed
+        guard let levelStartTime = currentLevelStartTime else { return }
+        
+        let timeSinceLastNotification = lastNotificationTime?.timeIntervalSinceNow ?? -notificationCooldownPeriod
+        let timeSinceLevelChange = Date().timeIntervalSince(levelStartTime)
+        
+        // Send notification if level has been stable for 5+ minutes and cooldown has passed
+        if timeSinceLevelChange > levelChangeThreshold &&
+           abs(timeSinceLastNotification) > notificationCooldownPeriod {
+            scheduleAirQualityNotification()
         }
     }
     
     private func scheduleAirQualityNotification() {
         let content = UNMutableNotificationContent()
-        content.title = "Air Quality Alert"
-        content.body = "CO2 levels are \(airQualityLevel.rawValue.lowercased()) (\(Int(co2Value)) PPM). Consider improving ventilation."
+        content.title = "Air Quality Changed"
+        
+        // Customize message based on level
+        switch airQualityLevel {
+        case .excellent:
+            content.body = "Air quality is now excellent (\(Int(co2Value)) PPM). Great air quality!"
+        case .good:
+            content.body = "Air quality is now good (\(Int(co2Value)) PPM). Nice air quality!"
+        case .moderate:
+            content.body = "Air quality is now moderate (\(Int(co2Value)) PPM). Consider increasing ventilation."
+        case .poor:
+            content.body = "Air quality is now poor (\(Int(co2Value)) PPM). Open windows or increase ventilation."
+        case .veryPoor:
+            content.body = "Air quality is now very poor (\(Int(co2Value)) PPM). Immediate ventilation required!"
+        }
+        
         content.sound = UNNotificationSound.default
         
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
@@ -401,7 +425,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             if let error = error {
                 print("Error scheduling notification: \(error)")
             } else {
-                print("Air quality notification scheduled")
+                print("Air quality change notification scheduled: \(self.airQualityLevel.rawValue)")
                 self.lastNotificationTime = Date()
             }
         }
@@ -537,5 +561,16 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     
     var displayTemperatureUnit: TemperatureUnit {
         return userSettings?.temperatureUnit ?? .celsius
+    }
+    
+    // MARK: - Testing/Debug Methods
+    
+    /// Simulates a CO2 level change for testing notifications
+    /// - Parameter co2Level: The CO2 value to simulate
+    func simulateCO2Reading(_ co2Level: Double) {
+        co2Value = co2Level
+        updateAirQualityLevel()
+        handleAirQualityNotifications()
+        print("🧪 Simulated CO2 reading: \(co2Level) PPM - Level: \(airQualityLevel.rawValue)")
     }
 }
