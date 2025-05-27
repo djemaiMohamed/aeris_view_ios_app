@@ -138,10 +138,6 @@ struct DeviceRow: View {
         bleManager.isAirQualityDevice(peripheral)
     }
     
-    private var devicePriority: Int {
-        bleManager.getDevicePriority(peripheral, rssi: NSNumber(value: -60), advertisedServices: [])
-    }
-    
     var body: some View {
         Button(action: onTap) {
             HStack {
@@ -180,10 +176,6 @@ struct DeviceRow: View {
                                 .font(.caption)
                                 .foregroundColor(.green)
                                 .fontWeight(.medium)
-                        } else {
-                            Text("Priority: \(devicePriority)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
                         }
                     }
                 }

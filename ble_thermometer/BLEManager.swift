@@ -82,40 +82,6 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         guard let name = peripheral.name else { return false }
         return name.hasPrefix("Air Quality")
     }
-    
-    /// Determines if a device should be prioritized for connection
-    /// - Parameters:
-    ///   - peripheral: The BLE peripheral
-    ///   - rssi: Signal strength
-    ///   - advertisedServices: Services advertised by the device
-    /// - Returns: Priority level (higher is better)
-    func getDevicePriority(_ peripheral: CBPeripheral, rssi: NSNumber, advertisedServices: [CBUUID]) -> Int {
-        var priority = 0
-        
-        // Highest priority: Air Quality devices
-        if isAirQualityDevice(peripheral) {
-            priority += 100
-        }
-        
-        // High priority: Devices with target service
-        if advertisedServices.contains(targetServiceUUID) {
-            priority += 50
-        }
-        
-        // Medium priority: Strong signal
-        if rssi.intValue > -60 {
-            priority += 20
-        } else if rssi.intValue > -70 {
-            priority += 10
-        }
-        
-        // Low priority: Has a name
-        if peripheral.name?.isEmpty == false {
-            priority += 5
-        }
-        
-        return priority
-    }
 
     // MARK: - Scanning
     func startScan() {
@@ -199,29 +165,14 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         
         // Check if this is an Air Quality device using helper function
         let isAirQuality = isAirQualityDevice(peripheral)
-        let devicePriority = getDevicePriority(peripheral, rssi: RSSI, advertisedServices: advertisedServices)
         
-        // Add device to list based on priority (threshold of 5 or higher, or if it's an Air Quality device)
-        if isAirQuality || devicePriority >= 5 {
-            if !peripherals.contains(peripheral) {
-                // Insert Air Quality devices at the beginning for priority
-                if isAirQuality {
-                    peripherals.insert(peripheral, at: 0)
-                    print("🎯 PRIORITY: Air Quality device added first: \(deviceName) | RSSI: \(RSSI) | Priority: \(devicePriority)")
-                } else {
-                    peripherals.append(peripheral)
-                    print("✅ Added device: \(deviceName) | RSSI: \(RSSI) | Priority: \(devicePriority) | Target Service: \(hasTargetService ? "Yes" : "No")")
-                }
-            } else if isAirQuality {
-                // Move existing Air Quality device to front if not already there
-                if let index = peripherals.firstIndex(of: peripheral), index != 0 {
-                    peripherals.remove(at: index)
-                    peripherals.insert(peripheral, at: 0)
-                    print("🔄 Moved Air Quality device to priority position: \(deviceName)")
-                }
-            }
+        // Add device to list
+        if isAirQuality && !peripherals.contains(peripheral) {
+            // Insert Air Quality devices at the beginning for priority
+            peripherals.append(peripheral)
+            print("Air Quality device added: \(deviceName)")
         } else {
-            print("⏭️ Skipped device: \(deviceName) | RSSI: \(RSSI) | Priority: \(devicePriority) (below threshold)")
+            print("Skipped device")
         }
     }
 
@@ -231,6 +182,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             self.isConnecting = false
             self.connectionStatus = "Connected"
             peripheral.discoverServices([self.targetServiceUUID])
+            print("🔗 Connected to \(peripheral.name ?? "Unknown Device")")
         }
     }
 
@@ -266,6 +218,21 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                 centralManager.scanForPeripherals(withServices: nil, options: nil)
             }
         }
+    }
+
+    // MARK: - Device Management
+    func forgetBondedDevice() {
+        UserDefaults.standard.removeObject(forKey: "bondedDeviceUUID")
+        isBonded = false
+        bondedPeripheral = nil
+        // if connectedPeripheral is not nil, disconnect it
+        guard let connectedPeripheral = connectedPeripheral else {
+            print("No connected peripheral to forget.")
+            return
+        }
+        disconnect(peripheral: connectedPeripheral)
+
+        print("🗑️ Forgotten bonded device.")
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
@@ -331,19 +298,11 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             print("Error updating notification state: \(error.localizedDescription)")
         } else {
             print("Notification state updated for \(characteristic.uuid)")
+            UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: "bondedDeviceUUID")
+            isBonded = true
+            bondedPeripheral = peripheral
+            print("🔗 Bonded to device: \(peripheral.name ?? "Unknown")")
         }
-    }
-    
-    // MARK: - Device Management
-    func forgetBondedDevice() {
-        UserDefaults.standard.removeObject(forKey: "bondedDeviceUUID")
-        isBonded = false
-        bondedPeripheral = nil
-        // Optionally, disconnect if currently connected to this peripheral
-        if let connectedPeripheral = connectedPeripheral, connectedPeripheral.identifier.uuidString == UserDefaults.standard.string(forKey: "bondedDeviceUUID") {
-            disconnect(peripheral: connectedPeripheral)
-        }
-        print("🗑️ Forgotten bonded device.")
     }
 
     // MARK: - Data Management
@@ -382,7 +341,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             let timeSincePoorAirQuality = Date().timeIntervalSince(poorAirQualityStartTime ?? Date())
             let timeSinceLastNotification = lastNotificationTime?.timeIntervalSinceNow ?? -notificationCooldownPeriod
             
-            if timeSincePoorAirQuality > poorAirQualityThreshold && 
+            if timeSincePoorAirQuality > poorAirQualityThreshold &&
                abs(timeSinceLastNotification) > notificationCooldownPeriod {
                 scheduleAirQualityNotification()
             }
