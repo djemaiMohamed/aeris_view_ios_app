@@ -151,7 +151,7 @@ struct SensorReadingsGrid: View {
             
             SensorCard(
                 title: "Temperature",
-                value: formatTemperature(bleManager.tempValue, isCelsius: bleManager.isTempCelsius),
+                value: formatTemperature(bleManager.displayTemperature, isCelsius: bleManager.displayTemperatureUnit == .celsius),
                 icon: "thermometer",
                 color: .orange
             )

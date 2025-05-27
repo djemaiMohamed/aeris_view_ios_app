@@ -5,8 +5,13 @@ import Charts
 struct HistoryView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \SensorReading.timestamp, order: .reverse) private var readings: [SensorReading]
+    @Query private var userSettings: [UserSettings]
     @State private var selectedTimeRange: HistoryTimeRange = .day
     @State private var selectedMetric: SensorMetric = .co2
+    
+    private var currentSettings: UserSettings {
+        userSettings.first ?? UserSettings()
+    }
     
     var filteredReadings: [SensorReading] {
         let now = Date()
@@ -63,13 +68,13 @@ struct HistoryView: View {
                             MetricSelectorCard(selectedMetric: $selectedMetric)
                             
                             // Chart Card
-                            ChartCard(readings: filteredReadings, metric: selectedMetric)
+                            ChartCard(readings: filteredReadings, metric: selectedMetric, userSettings: currentSettings)
                             
                             // Statistics Card
-                            StatisticsCard(readings: filteredReadings, metric: selectedMetric)
+                            StatisticsCard(readings: filteredReadings, metric: selectedMetric, userSettings: currentSettings)
                             
                             // Recent Readings List
-                            RecentReadingsCard(readings: Array(filteredReadings.prefix(10)))
+                            RecentReadingsCard(readings: Array(filteredReadings.prefix(10)), userSettings: currentSettings)
                         }
                         .padding()
                     }
@@ -123,6 +128,7 @@ struct MetricSelectorCard: View {
 struct ChartCard: View {
     let readings: [SensorReading]
     let metric: SensorMetric
+    let userSettings: UserSettings
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -137,7 +143,7 @@ struct ChartCard: View {
             Chart(readings) { reading in
                 LineMark(
                     x: .value("Time", reading.timestamp),
-                    y: .value(metric.displayName, metric.getValue(from: reading))
+                    y: .value(metric.displayName, metric.getValue(from: reading, userSettings: userSettings))
                 )
                 .foregroundStyle(metric.color)
                 .interpolationMethod(.catmullRom)
@@ -156,9 +162,10 @@ struct ChartCard: View {
 struct StatisticsCard: View {
     let readings: [SensorReading]
     let metric: SensorMetric
+    let userSettings: UserSettings
     
     private var statistics: (min: Double, max: Double, avg: Double) {
-        let values = readings.map { metric.getValue(from: $0) }
+        let values = readings.map { metric.getValue(from: $0, userSettings: userSettings) }
         guard !values.isEmpty else { return (0, 0, 0) }
         
         return (
@@ -176,19 +183,19 @@ struct StatisticsCard: View {
             HStack(spacing: 16) {
                 StatisticItem(
                     title: "Min",
-                    value: metric.formatValue(statistics.min),
+                    value: metric.formatValue(statistics.min, userSettings: userSettings),
                     color: .blue
                 )
                 
                 StatisticItem(
                     title: "Average",
-                    value: metric.formatValue(statistics.avg),
+                    value: metric.formatValue(statistics.avg, userSettings: userSettings),
                     color: .green
                 )
                 
                 StatisticItem(
                     title: "Max",
-                    value: metric.formatValue(statistics.max),
+                    value: metric.formatValue(statistics.max, userSettings: userSettings),
                     color: .red
                 )
             }
@@ -224,6 +231,7 @@ struct StatisticItem: View {
 
 struct RecentReadingsCard: View {
     let readings: [SensorReading]
+    let userSettings: UserSettings
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -232,7 +240,7 @@ struct RecentReadingsCard: View {
             
             LazyVStack(spacing: 8) {
                 ForEach(readings, id: \.timestamp) { reading in
-                    ReadingRow(reading: reading)
+                    ReadingRow(reading: reading, userSettings: userSettings)
                 }
             }
         }
@@ -245,6 +253,7 @@ struct RecentReadingsCard: View {
 
 struct ReadingRow: View {
     let reading: SensorReading
+    let userSettings: UserSettings
     
     var body: some View {
         HStack {
@@ -267,7 +276,7 @@ struct ReadingRow: View {
                 )
                 
                 MetricBadge(
-                    value: formatTemperature(reading.temperature, isCelsius: reading.isCelsius),
+                    value: formatTemperatureForUser(reading.temperature, reading.isCelsius, userUnit: userSettings.temperatureUnit),
                     color: .orange
                 )
                 
@@ -345,18 +354,26 @@ enum SensorMetric: CaseIterable {
         }
     }
     
-    func getValue(from reading: SensorReading) -> Double {
+    func getValue(from reading: SensorReading, userSettings: UserSettings? = nil) -> Double {
         switch self {
         case .co2: return reading.co2Value
-        case .temperature: return reading.temperature
+        case .temperature:
+            guard let settings = userSettings else { return reading.temperature }
+            if settings.temperatureUnit == .celsius {
+                return reading.isCelsius ? reading.temperature : convertTemperature(reading.temperature, toCelsius: true)
+            } else {
+                return reading.isCelsius ? convertTemperature(reading.temperature, toCelsius: false) : reading.temperature
+            }
         case .humidity: return reading.humidity
         }
     }
     
-    func formatValue(_ value: Double) -> String {
+    func formatValue(_ value: Double, userSettings: UserSettings? = nil) -> String {
         switch self {
         case .co2: return formatCO2(value)
-        case .temperature: return String(format: "%.1f°", value)
+        case .temperature:
+            guard let settings = userSettings else { return String(format: "%.1f°", value) }
+            return formatTemperature(value, isCelsius: settings.temperatureUnit == .celsius)
         case .humidity: return formatHumidity(value)
         }
     }
@@ -372,6 +389,21 @@ private func formatDate(_ date: Date) -> String {
     let formatter = DateFormatter()
     formatter.dateStyle = .short
     return formatter.string(from: date)
+}
+
+private func formatTemperatureForUser(_ temp: Double, _ isCelsius: Bool, userUnit: TemperatureUnit) -> String {
+    let convertedTemp: Double
+    let displayUnit: Bool
+    
+    if userUnit == .celsius {
+        convertedTemp = isCelsius ? temp : convertTemperature(temp, toCelsius: true)
+        displayUnit = true
+    } else {
+        convertedTemp = isCelsius ? convertTemperature(temp, toCelsius: false) : temp
+        displayUnit = false
+    }
+    
+    return formatTemperature(convertedTemp, isCelsius: displayUnit)
 }
 
 #Preview {

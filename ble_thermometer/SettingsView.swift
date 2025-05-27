@@ -26,7 +26,12 @@ struct SettingsView: View {
                 // Device Settings Section
                 Section("Device Settings") {
                     NavigationLink {
-                        MeasurementIntervalView(settings: currentSettings)
+                        MeasurementIntervalView(
+                            settings: currentSettings,
+                            onIntervalChanged: { newInterval in
+                                bleManager.writeMeasurementInterval(newInterval)
+                            }
+                        )
                     } label: {
                         SettingsRow(
                             icon: "clock.fill",
@@ -216,8 +221,9 @@ struct MeasurementIntervalView: View {
     @ObservedObject var settings: UserSettings
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+    let onIntervalChanged: ((Int) -> Void)?
     
-    private let intervals = [10, 30, 60, 120, 300, 600] // seconds
+    private let intervals = [30, 60, 120, 300, 600] // seconds
     
     var body: some View {
         List {
@@ -225,6 +231,7 @@ struct MeasurementIntervalView: View {
                 Button {
                     settings.measurementInterval = interval
                     try? modelContext.save()
+                    onIntervalChanged?(interval)
                     dismiss()
                 } label: {
                     HStack {

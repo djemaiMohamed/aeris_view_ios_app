@@ -15,6 +15,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     @Published var co2Value: Double = 0.0 // Last CO2 value received (PPM)
     @Published var tempValue: Double = 0.0 // Last temperature value received (degrees)
     @Published var humValue: Double = 0.0 // Last humidity value received (percentage)
+    @Published var measurementInterval: Int = 30 // Measurement interval in seconds
     @Published var isTempCelsius: Bool = true // Temperature unit flag
     @Published var isConnecting: Bool = false
     @Published var connectionStatus: String = "Disconnected"
@@ -27,6 +28,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     var readValueCompletion: [CBUUID: (String) -> Void] = [:]
     var characteristicNameCache: [CBUUID: String] = [:]
     var modelContext: ModelContext?
+    var userSettings: UserSettings?
     
     // MARK: - Notification Properties
     private var lastNotificationTime: Date?
@@ -39,6 +41,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     let co2CharUUID = CBUUID(string: "30171109-f957-45e4-81ef-f0c8e64116ea")
     let tempCharUUID = CBUUID(string: "2A1C")
     let humCharUUID = CBUUID(string: "2A6F")
+    let measurementIntervalUUID = CBUUID(string: "2A21")
 
     override init() {
         super.init()
@@ -49,6 +52,10 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     
     func setModelContext(_ context: ModelContext) {
         self.modelContext = context
+    }
+    
+    func setUserSettings(_ settings: UserSettings) {
+        self.userSettings = settings
     }
     
     private func requestNotificationPermission() {
@@ -244,6 +251,11 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                 characteristic.uuid == humCharUUID {
                 peripheral.setNotifyValue(true, for: characteristic)
             }
+
+            if characteristic.uuid == measurementIntervalUUID {
+                // Read the measurement interval characteristic
+                peripheral.readValue(for: characteristic)
+            }
         }
     }
 
@@ -279,6 +291,24 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             } else {
                 print("Failed to decode humidity value from: \(stringValue)")
             }
+        case measurementIntervalUUID:
+            print("Measurement interval updated: \(stringValue)")
+            if let interval = decodeMeasurementInterval(from: stringValue) {
+                measurementInterval = interval
+                print("Measurement interval set to \(interval) seconds")
+                
+                // Update UserSettings if available
+                if let settings = userSettings {
+                    settings.measurementInterval = interval
+                    // Save the context if available
+                    if let context = modelContext {
+                        try? context.save()
+                    }
+                    print("📱 UserSettings measurement interval updated to \(interval) seconds")
+                }
+            } else {
+                print("Failed to decode measurement interval from: \(stringValue)")
+            }
         default:
             break
         }
@@ -291,6 +321,14 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         
         // Handle notifications for air quality changes
         handleAirQualityNotifications()
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        if let error = error {
+            print("Write failed: \(error)")
+        } else {
+            print("Write successful")
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
@@ -425,6 +463,17 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         }
         return nil
     }
+
+    // decode measurement interval
+    private func decodeMeasurementInterval(from hexString: String) -> Int? {
+        // Measurement interval decoding
+        guard let data = Data(hexString: hexString) else { return nil }
+        if data.count >= 2 {
+            let value = UInt16(data[0]) | (UInt16(data[1]) << 8)
+            return Int(value)
+        }
+        return nil
+    }
     
     /// Automatically connects to the first Air Quality device found
     /// - Returns: True if an Air Quality device was found and connection initiated
@@ -443,5 +492,50 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     /// - Returns: Array of Air Quality device peripherals
     func getAirQualityDevices() -> [CBPeripheral] {
         return peripherals.filter { isAirQualityDevice($0) }
+    }
+    
+    // MARK: - Helper Functions
+    
+    /// Writes measurement interval to the connected BLE device
+    func writeMeasurementInterval(_ interval: Int) {
+        guard let peripheral = connectedPeripheral,
+              peripheral.state == .connected else {
+            print("No connected peripheral to write measurement interval")
+            return
+        }
+        
+        // Find the measurement interval characteristic
+        guard let services = peripheral.services else { return }
+        for service in services {
+            guard let characteristics = service.characteristics else { continue }
+            for characteristic in characteristics {
+                if characteristic.uuid == measurementIntervalUUID {
+                    // Convert interval to data (little-endian 16-bit)
+                    var intervalValue = UInt16(interval)
+                    let data = Data(bytes: &intervalValue, count: MemoryLayout<UInt16>.size)
+                    
+                    writeValue(for: characteristic, of: peripheral, value: data)
+                    print("📝 Writing measurement interval: \(interval) seconds")
+                    return
+                }
+            }
+        }
+        print("❌ Measurement interval characteristic not found")
+    }
+    
+    // MARK: - Computed Properties for User Preferences
+    var displayTemperature: Double {
+        guard let settings = userSettings else { return tempValue }
+        
+        // Convert temperature based on user's preferred unit
+        if settings.temperatureUnit == .celsius {
+            return isTempCelsius ? tempValue : convertTemperature(tempValue, toCelsius: true)
+        } else {
+            return isTempCelsius ? convertTemperature(tempValue, toCelsius: false) : tempValue
+        }
+    }
+    
+    var displayTemperatureUnit: TemperatureUnit {
+        return userSettings?.temperatureUnit ?? .celsius
     }
 }

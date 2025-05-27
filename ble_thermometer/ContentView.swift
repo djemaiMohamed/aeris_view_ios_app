@@ -59,6 +59,12 @@ struct ContentView: View {
             if userSettings.isEmpty {
                 let defaultSettings = UserSettings()
                 modelContext.insert(defaultSettings)
+                bleManager.setUserSettings(defaultSettings)
+            } else {
+                // Pass UserSettings reference to BLEManager
+                if let settings = userSettings.first {
+                    bleManager.setUserSettings(settings)
+                }
             }
         }
     }
