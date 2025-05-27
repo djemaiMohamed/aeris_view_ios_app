@@ -86,30 +86,20 @@ struct SettingsView: View {
                 
                 // Device Management Section
                 Section("Device Management") {
-                    if bleManager.connectedPeripheral != nil {
+                    if bleManager.isBonded {
                         Button {
-                            if let peripheral = bleManager.connectedPeripheral {
-                                bleManager.disconnect(peripheral: peripheral)
-                            }
+                            bleManager.forgetBondedDevice()
                         } label: {
                             SettingsRow(
-                                icon: "link.badge.plus",
-                                title: "Disconnect Device",
-                                value: nil,
+                                icon: "wifi.slash",
+                                title: "Forget This Device",
+                                value: bleManager.connectedPeripheral?.name ?? "N/A",
                                 color: .red
                             )
                         }
                     } else {
-                        Button {
-                            bleManager.startScan()
-                        } label: {
-                            SettingsRow(
-                                icon: "magnifyingglass",
-                                title: "Scan for Devices",
-                                value: nil,
-                                color: .blue
-                            )
-                        }
+                        Text("No device bonded.")
+                            .foregroundColor(.secondary)
                     }
                     
                     NavigationLink {

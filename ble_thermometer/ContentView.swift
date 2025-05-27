@@ -15,6 +15,7 @@ struct ContentView: View {
     
     var body: some View {
         Group {
+            //bleManager.reconnectToBondedDevice(with: bleManager.centralManager)
             if !bleManager.isBonded && !bleManager.isBluetoothEnabled {
                 OnboardingView(bleManager: bleManager)
             } else if !bleManager.isBonded {
@@ -53,8 +54,7 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            bleManager.setModelContext(modelContext)
-            
+            bleManager.setModelContext(modelContext)            
             // Create default settings if none exist
             if userSettings.isEmpty {
                 let defaultSettings = UserSettings()

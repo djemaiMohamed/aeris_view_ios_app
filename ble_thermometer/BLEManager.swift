@@ -8,6 +8,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     // MARK: - Published Properties
     @Published var isBluetoothEnabled = false // Tracks Bluetooth state
     @Published var peripherals: [CBPeripheral] = [] // List of discovered peripherals
+    // bondedPeripheral is used to reconnect to previously bonded devices
+    @Published var bondedPeripheral: CBPeripheral? // Previously bonded peripheral
     @Published var connectedPeripheral: CBPeripheral? // Currently connected peripheral
     @Published var isBonded: Bool = false // Tracks bonding status
     @Published var co2Value: Double = 0.0 // Last CO2 value received (PPM)
@@ -178,8 +180,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         if central.state == .poweredOn {
             isBluetoothEnabled = true
             // Auto reconnect to previously bonded devices
-            let knownPeripherals = central.retrieveConnectedPeripherals(withServices: [targetServiceUUID])
-            peripherals.append(contentsOf: knownPeripherals)
+            reconnectToBondedDevice(with: central)
         } else {
             isBluetoothEnabled = false
             print("Bluetooth is not powered on")
@@ -249,6 +250,24 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         }
     }
 
+    func reconnectToBondedDevice(with centralManager: CBCentralManager) {
+        if let uuidString = UserDefaults.standard.string(forKey: "bondedDeviceUUID"),
+        let uuid = UUID(uuidString: uuidString) {
+
+            let peripherals = centralManager.retrievePeripherals(withIdentifiers: [uuid])
+            if let peripheral = peripherals.first {
+                isBonded = true
+                //startScan()
+                print("🔗 Reconnecting to bonded device: \(peripheral.name ?? "Unknown")")
+                self.peripherals.append(contentsOf: peripherals)
+                connect(peripheral: peripheral)
+            } else {
+                // Fallback: scan and match by UUID or name prefix
+                centralManager.scanForPeripherals(withServices: nil, options: nil)
+            }
+        }
+    }
+
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         guard let characteristics = service.characteristics else { return }
         for characteristic in characteristics {
@@ -267,6 +286,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
         // Assume bonding is complete when value is received
         isBonded = true
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: "bondedDeviceUUID")
 
         // Parse and assign characteristic values using proper decoding functions
         switch characteristic.uuid {
@@ -314,6 +334,18 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         }
     }
     
+    // MARK: - Device Management
+    func forgetBondedDevice() {
+        UserDefaults.standard.removeObject(forKey: "bondedDeviceUUID")
+        isBonded = false
+        bondedPeripheral = nil
+        // Optionally, disconnect if currently connected to this peripheral
+        if let connectedPeripheral = connectedPeripheral, connectedPeripheral.identifier.uuidString == UserDefaults.standard.string(forKey: "bondedDeviceUUID") {
+            disconnect(peripheral: connectedPeripheral)
+        }
+        print("🗑️ Forgotten bonded device.")
+    }
+
     // MARK: - Data Management
     private func saveSensorReading() {
         guard let context = modelContext else { return }
