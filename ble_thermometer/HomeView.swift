@@ -138,10 +138,8 @@ struct SensorReadingsGrid: View {
     @ObservedObject var bleManager: BLEManager
     
     var body: some View {
-        LazyVGrid(columns: [
-            GridItem(.flexible()),
-            GridItem(.flexible())
-        ], spacing: 16) {
+        VStack(spacing: 16) {
+            // Full-width CO2 card
             SensorCard(
                 title: "CO2",
                 value: formatCO2(bleManager.co2Value),
@@ -149,26 +147,22 @@ struct SensorReadingsGrid: View {
                 color: bleManager.airQualityLevel.color
             )
             
-            SensorCard(
-                title: "Temperature",
-                value: formatTemperature(bleManager.displayTemperature, isCelsius: bleManager.displayTemperatureUnit == .celsius),
-                icon: "thermometer",
-                color: .orange
-            )
-            
-            SensorCard(
-                title: "Humidity",
-                value: formatHumidity(bleManager.humValue),
-                icon: "humidity",
-                color: .blue
-            )
-            
-            SensorCard(
-                title: "Status",
-                value: bleManager.isBonded ? "Bonded" : "Not Bonded",
-                icon: bleManager.isBonded ? "link" : "link.badge.plus",
-                color: bleManager.isBonded ? .green : .gray
-            )
+            // Temperature and Humidity cards in a row
+            HStack(spacing: 16) {
+                SensorCard(
+                    title: "Temperature",
+                    value: formatTemperature(bleManager.displayTemperature, isCelsius: bleManager.displayTemperatureUnit == .celsius),
+                    icon: "thermometer",
+                    color: .orange
+                )
+                
+                SensorCard(
+                    title: "Humidity",
+                    value: formatHumidity(bleManager.humValue),
+                    icon: "humidity",
+                    color: .blue
+                )
+            }
         }
     }
 }
@@ -179,27 +173,40 @@ struct SensorCard: View {
     let icon: String
     let color: Color
     
+    var isCO2Card: Bool { title == "CO2" }
+    
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: isCO2Card ? 12 : 8) {
             HStack {
                 Image(systemName: icon)
-                    .font(.title3)
+                    .font(isCO2Card ? .title2 : .title3)
                     .foregroundColor(color)
                 
                 Spacer()
             }
             
             Text(value)
-                .font(.title2)
+                .font(isCO2Card ? .largeTitle : .title2)
                 .fontWeight(.bold)
             
             Text(title)
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
-        .padding()
-        .background(Color(.systemGray6))
-        .cornerRadius(12)
+        .padding(isCO2Card ? 24 : 16)
+        .background {
+            if isCO2Card {
+                LinearGradient(
+                    gradient: Gradient(colors: [color.opacity(0.1), color.opacity(0.05)]), 
+                    startPoint: .topLeading, 
+                    endPoint: .bottomTrailing
+                )
+            } else {
+                Color(.systemGray6)
+            }
+        }
+        .cornerRadius(isCO2Card ? 16 : 12)
+        .shadow(color: isCO2Card ? color.opacity(0.3) : .clear, radius: isCO2Card ? 8 : 0, x: 0, y: 4)
     }
 }
 

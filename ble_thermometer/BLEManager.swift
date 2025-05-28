@@ -369,7 +369,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         let newLevel = getAirQualityLevel(co2: co2Value)
         
         // Check if level has changed
-        if previousAirQualityLevel != newLevel {
+        if airQualityLevel != newLevel {
             previousAirQualityLevel = airQualityLevel
             airQualityLevel = newLevel
             currentLevelStartTime = Date()

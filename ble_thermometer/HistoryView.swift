@@ -141,16 +141,64 @@ struct ChartCard: View {
             }
             
             Chart(readings) { reading in
-                LineMark(
-                    x: .value("Time", reading.timestamp),
-                    y: .value(metric.displayName, metric.getValue(from: reading, userSettings: userSettings))
-                )
-                .foregroundStyle(metric.color)
-                .interpolationMethod(.catmullRom)
+                let value = metric.getValue(from: reading, userSettings: userSettings)
+                if value > 0 {
+                    // Area fill with gradient
+                    AreaMark(
+                        x: .value("Time", reading.timestamp),
+                        y: .value(metric.displayName, value)
+                    )
+                    .foregroundStyle(
+                        LinearGradient(
+                            gradient: Gradient(colors: [
+                                metric.color.opacity(0.3),
+                                metric.color.opacity(0.1),
+                                metric.color.opacity(0.05)
+                            ]),
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .interpolationMethod(.catmullRom)
+                    
+                    // Main line
+                    LineMark(
+                        x: .value("Time", reading.timestamp),
+                        y: .value(metric.displayName, value)
+                    )
+                    .foregroundStyle(metric.color)
+                    .lineStyle(StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+                    .interpolationMethod(.catmullRom)
+                    
+                    // Data points
+                    PointMark(
+                        x: .value("Time", reading.timestamp),
+                        y: .value(metric.displayName, value)
+                    )
+                    .foregroundStyle(metric.color)
+                    .symbolSize(40)
+                    .opacity(0.8)
+                }
             }
-            .frame(height: 200)
+            .frame(height: 250)
             .chartYAxisLabel(metric.unit)
             .chartXAxisLabel("Time")
+            .chartPlotStyle { plotArea in
+                plotArea
+                    .background(
+                        LinearGradient(
+                            gradient: Gradient(colors: [
+                                Color(.systemBackground),
+                                metric.color.opacity(0.02)
+                            ]),
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .border(metric.color.opacity(0.1), width: 1)
+            }
+            .animation(.easeInOut(duration: 1.2), value: readings.count)
+            .animation(.easeInOut(duration: 0.8), value: metric)
         }
         .padding()
         .background(Color(.systemBackground))
@@ -359,11 +407,17 @@ enum SensorMetric: CaseIterable {
         case .co2: return reading.co2Value
         case .temperature:
             guard let settings = userSettings else { return reading.temperature }
+            let convertedTemp: Double
             if settings.temperatureUnit == .celsius {
-                return reading.isCelsius ? reading.temperature : convertTemperature(reading.temperature, toCelsius: true)
+                convertedTemp = reading.isCelsius ? reading.temperature : convertTemperature(reading.temperature, toCelsius: true)
             } else {
-                return reading.isCelsius ? convertTemperature(reading.temperature, toCelsius: false) : reading.temperature
+                convertedTemp = reading.isCelsius ? convertTemperature(reading.temperature, toCelsius: false) : reading.temperature
             }
+            // Filter out 32°F (0°C) values
+            if abs(convertedTemp - (settings.temperatureUnit == .celsius ? 0.0 : 32.0)) < 0.1 {
+                return 0
+            }
+            return convertedTemp
         case .humidity: return reading.humidity
         }
     }
