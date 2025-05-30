@@ -111,7 +111,7 @@ struct AirQualityOverviewCard: View {
                     .cornerRadius(8)
             }
             
-            Text(getAirQualityRecommendation(level: bleManager.airQualityLevel))
+            Text(getAirQualityRecommendation(level: bleManager.airQualityLevel, co2Value: bleManager.co2Value))
                 .font(.body)
                 .foregroundColor(.secondary)
         }
@@ -209,7 +209,7 @@ struct QuickInsightsCard: View {
             VStack(spacing: 8) {
                 InsightRow(
                     icon: "leaf.fill",
-                    text: "Air quality is \(bleManager.airQualityLevel.rawValue.lowercased())",
+                    text: bleManager.airQualityLevel.rawValue == "Waiting for Data" ? "Waiting for sensor data..." : "Air quality is \(bleManager.airQualityLevel.rawValue.lowercased())",
                     color: bleManager.airQualityLevel.color
                 )
                 
@@ -261,6 +261,9 @@ private func formatLastUpdate(_ date: Date) -> String {
 }
 
 private func getTemperatureInsight(temp: Double) -> String {
+    // Check if temperature is 0 (no data received yet)
+    guard temp != 0 else { return "Waiting for temperature data..." }
+    
     switch temp {
     case ..<18:
         return "Temperature is quite cool"
@@ -274,6 +277,9 @@ private func getTemperatureInsight(temp: Double) -> String {
 }
 
 private func getHumidityInsight(humidity: Double) -> String {
+    // Check if humidity is 0 (no data received yet)
+    guard humidity != 0 else { return "Waiting for humidity data..." }
+    
     switch humidity {
     case ..<30:
         return "Air is quite dry"

@@ -4,6 +4,7 @@ import SwiftData
 
 // MARK: - Air Quality Assessment
 enum AirQualityLevel: String, CaseIterable {
+    case waitingForData = "Waiting for Data"
     case excellent = "Excellent"
     case good = "Good"
     case moderate = "Moderate"
@@ -12,6 +13,7 @@ enum AirQualityLevel: String, CaseIterable {
     
     var color: Color {
         switch self {
+        case .waitingForData: return .gray
         case .excellent: return .green
         case .good: return .mint
         case .moderate: return .yellow
@@ -22,6 +24,7 @@ enum AirQualityLevel: String, CaseIterable {
     
     var iconName: String {
         switch self {
+        case .waitingForData: return "clock.circle"
         case .excellent: return "leaf.fill"
         case .good: return "checkmark.circle.fill"
         case .moderate: return "exclamationmark.triangle.fill"
@@ -116,6 +119,9 @@ func decodeBatteryLevel(from hexString: String) -> Int? {
 
 // MARK: - Air Quality Functions
 func getAirQualityLevel(co2: Double) -> AirQualityLevel {
+    // If CO2 is 0, treat as no data - return waitingForData
+    guard co2 > 0 else { return .waitingForData }
+    
     switch co2 {
     case 0..<400: return .excellent
     case 400..<1000: return .good
@@ -125,8 +131,14 @@ func getAirQualityLevel(co2: Double) -> AirQualityLevel {
     }
 }
 
-func getAirQualityRecommendation(level: AirQualityLevel) -> String {
+func getAirQualityRecommendation(level: AirQualityLevel, co2Value: Double = 0) -> String {
+    // Show waiting message when no data is available
+    if co2Value == 0 {
+        return "Waiting for sensor data..."
+    }
+    
     switch level {
+    case .waitingForData: return "Waiting for sensor data..."
     case .excellent: return "Perfect air quality! Keep it up."
     case .good: return "Good air quality. No action needed."
     case .moderate: return "Consider increasing ventilation."
@@ -137,15 +149,18 @@ func getAirQualityRecommendation(level: AirQualityLevel) -> String {
 
 // MARK: - Formatting Functions
 func formatCO2(_ co2: Double) -> String {
+    guard co2 > 0 else { return "— PPM" }
     return String(format: "%.0f PPM", co2)
 }
 
 func formatTemperature(_ temp: Double, isCelsius: Bool) -> String {
+    guard temp != 0 else { return "—" }
     let unit = isCelsius ? "°C" : "°F"
     return String(format: "%.1f%@", temp, unit)
 }
 
 func formatHumidity(_ humidity: Double) -> String {
+    guard humidity > 0 else { return "—%" }
     return String(format: "%.1f%%", humidity)
 }
 
