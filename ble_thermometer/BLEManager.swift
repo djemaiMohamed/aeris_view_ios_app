@@ -192,7 +192,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             self.connectedPeripheral = peripheral
             self.isConnecting = false
             self.connectionStatus = "Connected"
-            peripheral.discoverServices([self.targetServiceUUID])
+            peripheral.discoverServices([self.targetServiceUUID, self.batteryServiceUUID])
             print("🔗 Connected to \(peripheral.name ?? "Unknown Device")")
         }
     }
