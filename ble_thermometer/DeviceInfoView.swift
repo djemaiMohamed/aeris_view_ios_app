@@ -29,6 +29,17 @@ struct DeviceInfoView: View {
                             }
                         }
                         .foregroundColor(.red)
+                    } else if let bondedDevice = bleManager.bondedPeripheral {
+                        Button("Connect to \(bondedDevice.name ?? "Device")") {
+                            bleManager.connect(peripheral: bondedDevice)
+                        }
+                        .foregroundColor(.green)
+                        
+                        Button("Scan for Devices") {
+                            bleManager.startScan()
+                            dismiss()
+                        }
+                        .foregroundColor(.blue)
                     } else {
                         Button("Scan for Devices") {
                             bleManager.startScan()

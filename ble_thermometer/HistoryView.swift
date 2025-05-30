@@ -287,7 +287,7 @@ struct RecentReadingsCard: View {
                 .font(.headline)
             
             LazyVStack(spacing: 8) {
-                ForEach(readings, id: \.timestamp) { reading in
+                ForEach(readings) { reading in
                     ReadingRow(reading: reading, userSettings: userSettings)
                 }
             }
