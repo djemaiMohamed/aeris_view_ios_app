@@ -4,6 +4,7 @@ import CoreBluetooth
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var bleManager = BLEManager()
     @Query private var userSettings: [UserSettings]
     @State private var showOnboarding = false
@@ -65,6 +66,12 @@ struct ContentView: View {
                 if let settings = userSettings.first {
                     bleManager.setUserSettings(settings)
                 }
+            }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .background {
+                // Perform memory cleanup when app goes to background
+                bleManager.performMemoryCleanup()
             }
         }
     }

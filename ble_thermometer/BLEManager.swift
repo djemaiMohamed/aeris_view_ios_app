@@ -2,6 +2,7 @@ import CoreBluetooth
 import SwiftData
 import UserNotifications
 import SwiftUI
+import Foundation
 
 class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
@@ -112,6 +113,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
     func stopScan() {
         centralManager.stopScan()
+        // Clean up completion handlers to prevent memory leaks
+        readValueCompletion.removeAll()
         print("Scanning stopped")
     }
 
@@ -165,7 +168,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
         // Check if device advertises our target service
         let advertisedServices = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
-        let hasTargetService = advertisedServices.contains(targetServiceUUID)
+        _ = advertisedServices.contains(targetServiceUUID) // Check but don't store unused value
         
         // Log all discovered devices for debugging
         let deviceName = peripheral.name ?? "Unknown Device"
@@ -175,9 +178,12 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         // Check if this is an Air Quality device using helper function
         let isAirQuality = isAirQualityDevice(peripheral)
         
-        // Add device to list
+        // Add device to list with size limit to prevent memory issues
         if isAirQuality && !peripherals.contains(peripheral) {
-            // Insert Air Quality devices at the beginning for priority
+            // Limit the number of peripherals to prevent memory bloat
+            if peripherals.count >= 50 {
+                peripherals.removeFirst(10) // Remove oldest 10 when limit reached
+            }
             peripherals.append(peripheral)
             print("Air Quality device added: \(deviceName)")
         } else {
@@ -200,6 +206,9 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             self.connectedPeripheral = nil
             self.isConnecting = false
             self.connectionStatus = "Disconnected"
+            
+            // Clean up completion handlers for this peripheral
+            self.readValueCompletion.removeAll()
         }
     }
 
@@ -268,7 +277,6 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
         // Assume bonding is complete when value is received
         isBonded = true
-        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: "bondedDeviceUUID")
 
         // Parse and assign characteristic values using proper decoding functions
         switch characteristic.uuid {
@@ -354,8 +362,15 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     }
 
     // MARK: - Data Management
+    private var lastSaveTime: Date = Date()
+    private let minimumSaveInterval: TimeInterval = 60 // Save at most once per minute
+    
     private func saveSensorReading() {
         guard let context = modelContext else { return }
+        
+        // Throttle database saves to improve performance
+        let now = Date()
+        guard now.timeIntervalSince(lastSaveTime) >= minimumSaveInterval else { return }
         
         let reading = SensorReading(
             co2Value: co2Value,
@@ -368,8 +383,35 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         
         do {
             try context.save()
+            lastSaveTime = now
+            
+            // Clean up old readings to prevent database bloat
+            cleanupOldReadings(context: context)
         } catch {
             print("Failed to save sensor reading: \(error)")
+        }
+    }
+    
+    private func cleanupOldReadings(context: ModelContext) {
+        // Keep only readings from the last 30 days
+        let cutoffDate = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()
+        
+        let request = FetchDescriptor<SensorReading>(
+            predicate: #Predicate<SensorReading> { reading in
+                reading.timestamp < cutoffDate
+            }
+        )
+        
+        do {
+            let oldReadings = try context.fetch(request)
+            if !oldReadings.isEmpty {
+                for reading in oldReadings {
+                    context.delete(reading)
+                }
+                print("Cleaned up \(oldReadings.count) old readings")
+            }
+        } catch {
+            print("Failed to cleanup old readings: \(error)")
         }
     }
     
@@ -383,8 +425,6 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             airQualityLevel = newLevel
             // currentLevelStartTime = Date() // Removed
             print("Air quality level changed to: \(newLevel.rawValue)")
-        } else {
-            airQualityLevel = newLevel
         }
         
         lastUpdateTime = Date()
@@ -428,63 +468,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     }
     
     // MARK: - Helper Functions
-    private func getAirQualityLevel(co2: Double) -> AirQualityLevel {
-        switch co2 {
-        case 0..<400:
-            return .excellent
-        case 400..<1000:
-            return .good
-        case 1000..<2000:
-            return .moderate
-        case 2000..<5000:
-            return .poor
-        default:
-            return .veryPoor
-        }
-    }
     
-    private func decodeCO2Measurement(from hexString: String) -> Double? {
-        // Simple hex to decimal conversion for CO2 values
-        // Adjust this based on your device's data format
-        guard let data = Data(hexString: hexString) else { return nil }
-        if data.count >= 2 {
-            let value = UInt16(data[0]) | (UInt16(data[1]) << 8)
-            return Double(value)
-        }
-        return nil
-    }
-    
-    private func decodeTemperatureMeasurement(from hexString: String) -> (temperature: Double, isCelsius: Bool)? {
-        // Decode hex string into Data
-        guard let data = Data(hexString: hexString) else { return nil }
-        guard data.count >= 5 else { return nil }
-
-        let flags = data[0]
-        let isCelsius = (flags & 0x01) == 0
-
-        // Extract 24-bit signed integer from data[1...3]
-        let rawValue = Int32(UInt32(data[1]) | (UInt32(data[2]) << 8) | (UInt32(data[3]) << 16))
-        
-        // Sign-extend the 24-bit value to 32-bit
-        let signedValue = (rawValue << 8) >> 8
-        
-        // Apply exponent -3
-        let temperature = Double(signedValue) / 1000.0
-
-        return (temperature, isCelsius)
-    }
-    
-    private func decodeHumidityMeasurement(from hexString: String) -> Double? {
-        // Humidity measurement decoding
-        guard let data = Data(hexString: hexString) else { return nil }
-        if data.count >= 2 {
-            let value = UInt16(data[0]) | (UInt16(data[1]) << 8)
-            return Double(value)
-        }
-        return nil
-    }
-
-    // decode measurement interval
     private func decodeMeasurementInterval(from hexString: String) -> Int? {
         // Measurement interval decoding
         guard let data = Data(hexString: hexString) else { return nil }
@@ -568,5 +552,28 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         updateAirQualityLevel()
         handleAirQualityNotifications()
         print("🧪 Simulated CO2 reading: \(co2Level) PPM - Level: \(airQualityLevel.rawValue)")
+    }
+    
+    // MARK: - Memory Management
+    
+    /// Cleans up resources to improve performance and reduce memory usage
+    func performMemoryCleanup() {
+        // Clear completion handlers
+        readValueCompletion.removeAll()
+        
+        // Limit peripherals array size
+        if peripherals.count > 20 {
+            let airQualityDevices = peripherals.filter { isAirQualityDevice($0) }
+            let otherDevices = peripherals.filter { !isAirQualityDevice($0) }
+            
+            // Keep all Air Quality devices but limit others
+            peripherals = airQualityDevices + Array(otherDevices.prefix(10))
+            print("🧹 Cleaned up peripherals array: \(peripherals.count) devices remaining")
+        }
+        
+        // Trigger old readings cleanup if we have context
+        if let context = modelContext {
+            cleanupOldReadings(context: context)
+        }
     }
 }
