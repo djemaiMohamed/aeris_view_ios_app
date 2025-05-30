@@ -1,6 +1,6 @@
 import SwiftUI
 import SwiftData
-import UIKit
+import UserNotifications
 
 struct SettingsView: View {
     @ObservedObject var bleManager: BLEManager
@@ -92,6 +92,13 @@ struct SettingsView: View {
                 // Device Management Section
                 Section("Device Management") {
                     if bleManager.isBonded {
+                        SettingsRow(
+                            icon: batteryIcon(for: bleManager.batteryLevel),
+                            title: "Battery Level",
+                            value: "\(bleManager.batteryLevel)%",
+                            color: batteryColor(for: bleManager.batteryLevel)
+                        )
+                        
                         Button {
                             bleManager.forgetBondedDevice()
                         } label: {
@@ -188,6 +195,26 @@ struct SettingsView: View {
             try modelContext.save()
         } catch {
             print("Error clearing data: \(error)")
+        }
+    }
+    
+    private func batteryColor(for level: Int) -> Color {
+        switch level {
+        case 76...100: return .green
+        case 51...75: return .yellow
+        case 26...50: return .orange
+        case 1...25: return .red
+        default: return .gray
+        }
+    }
+    
+    private func batteryIcon(for level: Int) -> String {
+        switch level {
+        case 76...100: return "battery.100"
+        case 51...75: return "battery.75"
+        case 26...50: return "battery.25"
+        case 1...25: return "battery.0"
+        default: return "battery.0"
         }
     }
 }

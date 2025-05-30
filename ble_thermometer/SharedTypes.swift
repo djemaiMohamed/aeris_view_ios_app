@@ -108,6 +108,12 @@ func decodeHumidityMeasurement(from hexString: String) -> Double? {
     return Double(humidityValue)
 }
 
+func decodeBatteryLevel(from hexString: String) -> Int? {
+    guard let data = Data(hexString: hexString), data.count == 1 else { return nil }
+    let batteryValue = data[0]
+    return Int(batteryValue)
+}
+
 // MARK: - Air Quality Functions
 func getAirQualityLevel(co2: Double) -> AirQualityLevel {
     switch co2 {

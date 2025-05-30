@@ -21,6 +21,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     @Published var connectionStatus: String = "Disconnected"
     @Published var airQualityLevel: AirQualityLevel = .excellent
     @Published var lastUpdateTime: Date = Date()
+    @Published var batteryLevel: Int = 0 // Battery level percentage (0-100)
     
     // MARK: - BLE Core Properties
     var centralManager: CBCentralManager!
@@ -39,10 +40,12 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
     // Replace these UUIDs with your actual service and characteristic UUIDs
     let targetServiceUUID = CBUUID(string: "1809")
+    let batteryServiceUUID = CBUUID(string: "180F") // Battery Service
     let co2CharUUID = CBUUID(string: "30171109-f957-45e4-81ef-f0c8e64116ea")
     let tempCharUUID = CBUUID(string: "2A1C")
     let humCharUUID = CBUUID(string: "2A6F")
     let measurementIntervalUUID = CBUUID(string: "2A21")
+    let batteryLevelUUID = CBUUID(string: "2A19") // Battery Level Characteristic
 
     override init() {
         super.init()
@@ -130,7 +133,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     func discoverServices(for peripheral: CBPeripheral, completion: @escaping ([CBService]) -> Void) {
         peripheral.delegate = self
         serviceDiscoveryCompletion = completion
-        peripheral.discoverServices([targetServiceUUID])
+        peripheral.discoverServices([targetServiceUUID, batteryServiceUUID])
     }
 
     func setNotifyValue(_ enabled: Bool, for characteristic: CBCharacteristic, of peripheral: CBPeripheral) {
@@ -249,7 +252,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             // Enable notifications for relevant characteristics
             if characteristic.uuid == co2CharUUID ||
                 characteristic.uuid == tempCharUUID ||
-                characteristic.uuid == humCharUUID {
+                characteristic.uuid == humCharUUID ||
+                characteristic.uuid == batteryLevelUUID {
                 peripheral.setNotifyValue(true, for: characteristic)
             }
 
@@ -291,6 +295,13 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                 print("Humidity decoded: \(decodedValue)%")
             } else {
                 print("Failed to decode humidity value from: \(stringValue)")
+            }
+        case batteryLevelUUID:
+            if let decodedValue = decodeBatteryLevel(from: stringValue) {
+                batteryLevel = decodedValue
+                print("Battery level decoded: \(decodedValue)%")
+            } else {
+                print("Failed to decode battery level from: \(stringValue)")
             }
         case measurementIntervalUUID:
             print("Measurement interval updated: \(stringValue)")
