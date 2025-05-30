@@ -33,10 +33,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     
     // MARK: - Notification Properties
     private var lastNotificationTime: Date?
-    private var currentLevelStartTime: Date?
-    private var previousAirQualityLevel: AirQualityLevel?
+    private var co2ValueWasBelowThreshold: Bool = true // Added
     private let notificationCooldownPeriod: TimeInterval = 300 // 5 minutes
-    private let levelChangeThreshold: TimeInterval = 300 // 5 minutes
 
     // Replace these UUIDs with your actual service and characteristic UUIDs
     let targetServiceUUID = CBUUID(string: "1809")
@@ -381,9 +379,9 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         
         // Check if level has changed
         if airQualityLevel != newLevel {
-            previousAirQualityLevel = airQualityLevel
+            // previousAirQualityLevel = airQualityLevel // Removed
             airQualityLevel = newLevel
-            currentLevelStartTime = Date()
+            // currentLevelStartTime = Date() // Removed
             print("Air quality level changed to: \(newLevel.rawValue)")
         } else {
             airQualityLevel = newLevel
@@ -396,36 +394,23 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         // Check if user has notifications enabled
         guard let settings = userSettings, settings.notificationsEnabled else { return }
         
-        // Check if we have a level change and enough time has passed
-        guard let levelStartTime = currentLevelStartTime else { return }
-        
-        let timeSinceLastNotification = lastNotificationTime?.timeIntervalSinceNow ?? -notificationCooldownPeriod
-        let timeSinceLevelChange = Date().timeIntervalSince(levelStartTime)
-        
-        // Send notification if level has been stable for 5+ minutes and cooldown has passed
-        if timeSinceLevelChange > levelChangeThreshold &&
-           abs(timeSinceLastNotification) > notificationCooldownPeriod {
-            scheduleAirQualityNotification()
+        let co2Threshold = settings.co2AlertThreshold
+        let timeSinceLastNotification = lastNotificationTime?.timeIntervalSinceNow ?? -(notificationCooldownPeriod + 1) // Ensure first notification can pass
+
+        if co2Value > co2Threshold && co2ValueWasBelowThreshold && abs(timeSinceLastNotification) > notificationCooldownPeriod {
+            scheduleAirQualityNotification(currentCO2: co2Value, threshold: co2Threshold)
+            co2ValueWasBelowThreshold = false
+            // lastNotificationTime will be set in scheduleAirQualityNotification upon success
+        } else if co2Value <= co2Threshold {
+            co2ValueWasBelowThreshold = true // Reset when value drops below or equals threshold
         }
     }
     
-    private func scheduleAirQualityNotification() {
+    private func scheduleAirQualityNotification(currentCO2: Double, threshold: Double) {
         let content = UNMutableNotificationContent()
-        content.title = "Air Quality Changed"
+        content.title = "CO2 Alert"
         
-        // Customize message based on level
-        switch airQualityLevel {
-        case .excellent:
-            content.body = "Air quality is now excellent (\(Int(co2Value)) PPM). Great air quality!"
-        case .good:
-            content.body = "Air quality is now good (\(Int(co2Value)) PPM). Nice air quality!"
-        case .moderate:
-            content.body = "Air quality is now moderate (\(Int(co2Value)) PPM). Consider increasing ventilation."
-        case .poor:
-            content.body = "Air quality is now poor (\(Int(co2Value)) PPM). Open windows or increase ventilation."
-        case .veryPoor:
-            content.body = "Air quality is now very poor (\(Int(co2Value)) PPM). Immediate ventilation required!"
-        }
+        content.body = "CO2 level is \(Int(currentCO2)) PPM, exceeding the threshold of \(Int(threshold)) PPM. Consider increasing ventilation."
         
         content.sound = UNNotificationSound.default
         
@@ -434,9 +419,9 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
         UNUserNotificationCenter.current().add(request) { error in
             if let error = error {
-                print("Error scheduling notification: \(error)")
+                print("Error scheduling CO2 alert notification: \(error)")
             } else {
-                print("Air quality change notification scheduled: \(self.airQualityLevel.rawValue)")
+                print("CO2 alert notification scheduled. Current: \(Int(currentCO2)) PPM, Threshold: \(Int(threshold)) PPM")
                 self.lastNotificationTime = Date()
             }
         }
