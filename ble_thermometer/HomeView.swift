@@ -114,18 +114,6 @@ struct AirQualityOverviewCard: View {
             Text(getAirQualityRecommendation(level: bleManager.airQualityLevel))
                 .font(.body)
                 .foregroundColor(.secondary)
-            
-            HStack {
-                Text("Last updated:")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                Text(formatLastUpdate(bleManager.lastUpdateTime))
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                Spacer()
-            }
         }
         .padding()
         .background(Color(.systemBackground))
