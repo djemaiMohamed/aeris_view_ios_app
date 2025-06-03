@@ -42,7 +42,12 @@ struct SettingsView: View {
                     }
                     
                     NavigationLink {
-                        TemperatureUnitView(settings: currentSettings)
+                        TemperatureUnitView(
+                            settings: currentSettings,
+                            onUnitChanged: { newUnit in
+                                bleManager.writeTemperatureUnit(newUnit == .celsius)
+                            }
+                        )
                     } label: {
                         SettingsRow(
                             icon: "thermometer",
@@ -293,6 +298,7 @@ struct TemperatureUnitView: View {
     @ObservedObject var settings: UserSettings
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+    let onUnitChanged: ((TemperatureUnit) -> Void)?
     
     var body: some View {
         List {
@@ -300,6 +306,7 @@ struct TemperatureUnitView: View {
                 Button {
                     settings.temperatureUnit = unit
                     try? modelContext.save()
+                    onUnitChanged?(unit)
                     dismiss()
                 } label: {
                     HStack {

@@ -44,6 +44,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     let tempCharUUID = CBUUID(string: "2A1C")
     let humCharUUID = CBUUID(string: "2A6F")
     let measurementIntervalUUID = CBUUID(string: "2A21")
+    let tempUnitCharUUID = CBUUID(string: "123c7dfe-ede3-4889-84c5-c0382a32df05") // Temperature Unit Characteristic
     let batteryLevelUUID = CBUUID(string: "2A19") // Battery Level Characteristic
 
     override init() {
@@ -268,6 +269,11 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                 // Read the measurement interval characteristic
                 peripheral.readValue(for: characteristic)
             }
+            
+            if characteristic.uuid == tempUnitCharUUID {
+                // Read the temperature unit characteristic
+                peripheral.readValue(for: characteristic)
+            }
         }
     }
 
@@ -326,6 +332,14 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                 }
             } else {
                 print("Failed to decode measurement interval from: \(stringValue)")
+            }
+        case tempUnitCharUUID:
+            print("Temperature unit updated: \(stringValue)")
+            if let tempUnit = decodeTemperatureUnit(from: stringValue) {
+                isTempCelsius = (tempUnit == 0)
+                print("Temperature unit set to \(isTempCelsius ? "Celsius" : "Fahrenheit")")
+            } else {
+                print("Failed to decode temperature unit from: \(stringValue)")
             }
         default:
             break
@@ -479,6 +493,12 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         return nil
     }
     
+    private func decodeTemperatureUnit(from hexString: String) -> UInt8? {
+        // Temperature unit decoding (1 byte: 0 = Celsius, 1 = Fahrenheit)
+        guard let data = Data(hexString: hexString), data.count >= 1 else { return nil }
+        return data[0]
+    }
+    
     /// Automatically connects to the first Air Quality device found
     /// - Returns: True if an Air Quality device was found and connection initiated
     func connectToFirstAirQualityDevice() -> Bool {
@@ -525,6 +545,33 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             }
         }
         print("❌ Measurement interval characteristic not found")
+    }
+    
+    /// Writes temperature unit to the connected BLE device
+    func writeTemperatureUnit(_ isCelsius: Bool) {
+        guard let peripheral = connectedPeripheral,
+              peripheral.state == .connected else {
+            print("No connected peripheral to write temperature unit")
+            return
+        }
+        
+        // Find the temperature unit characteristic
+        guard let services = peripheral.services else { return }
+        for service in services {
+            guard let characteristics = service.characteristics else { continue }
+            for characteristic in characteristics {
+                if characteristic.uuid == tempUnitCharUUID {
+                    // Convert temperature unit to data (1 byte: 0 = Celsius, 1 = Fahrenheit)
+                    let unitValue: UInt8 = isCelsius ? 0 : 1
+                    let data = Data([unitValue])
+                    
+                    writeValue(for: characteristic, of: peripheral, value: data)
+                    print("📝 Writing temperature unit: \(isCelsius ? "Celsius" : "Fahrenheit")")
+                    return
+                }
+            }
+        }
+        print("❌ Temperature unit characteristic not found")
     }
     
     // MARK: - Computed Properties for User Preferences

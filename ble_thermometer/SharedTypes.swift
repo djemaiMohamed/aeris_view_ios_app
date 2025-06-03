@@ -52,6 +52,17 @@ final class SensorReading {
     }
 }
 
+// MARK: - BLE Data Structures
+struct TemperatureReading {
+    let temperature: Double
+    let isCelsius: Bool
+    
+    init(temperature: Double, isCelsius: Bool = true) {
+        self.temperature = temperature
+        self.isCelsius = isCelsius
+    }
+}
+
 @Model
 final class UserSettings: ObservableObject {
     var measurementInterval: Int // in seconds
@@ -91,30 +102,45 @@ enum TemperatureUnit: String, CaseIterable, Codable {
 // MARK: - BLE Decoding Functions
 func decodeCO2Measurement(from hexString: String) -> Double? {
     guard let data = Data(hexString: hexString), data.count >= 2 else { return nil }
-    let co2Value = data.withUnsafeBytes { $0.load(as: UInt16.self) }
+    
+    // Assuming CO2 is sent as a 16-bit unsigned integer (little-endian)
+    let co2Value = UInt16(data[0]) | (UInt16(data[1]) << 8)
     return Double(co2Value)
 }
 
-func decodeTemperatureMeasurement(from hexString: String) -> (temperature: Double, isCelsius: Bool)? {
-    guard let data = Data(hexString: hexString), data.count >= 3 else { return nil }
-    let flags = data[0]
-    let isCelsius = (flags & 0x01) == 0
-    let tempData = data.subdata(in: 1..<3)
-    let tempValue = tempData.withUnsafeBytes { $0.load(as: Int16.self) }
+func decodeTemperatureMeasurement(from hexString: String) -> TemperatureReading? {
+    guard let data = Data(hexString: hexString), data.count >= 5 else { return nil }
+    
+    // Temperature format: [unit_flag][temp_byte1][temp_byte2][temp_byte3][temp_byte4]
+    // Unit flag: 0 = Celsius, 1 = Fahrenheit
+    let isCelsius = data[0] == 0
+    
+    // Extract 32-bit temperature value (little-endian) from bytes 1-4
+    let tempRaw = UInt32(data[1]) | 
+                  (UInt32(data[2]) << 8) | 
+                  (UInt32(data[3]) << 16) | 
+                  (UInt32(data[4]) << 24)
+    
+    // Extract the temperature value (lower 24 bits) and convert from millidegrees
+    let tempValue = Int32(tempRaw & 0x00ffffff)
     let temperature = Double(tempValue) / 1000.0
-    return (temperature, isCelsius)
+    
+    return TemperatureReading(temperature: temperature, isCelsius: isCelsius)
 }
 
 func decodeHumidityMeasurement(from hexString: String) -> Double? {
-    guard let data = Data(hexString: hexString), data.count == 2 else { return nil }
-    let humidityValue = data.withUnsafeBytes { $0.load(as: UInt16.self) }
-    return Double(humidityValue)
+    guard let data = Data(hexString: hexString), data.count >= 2 else { return nil }
+    
+    // Humidity is sent as a 16-bit unsigned integer (little-endian) in percent
+    let humidityRaw = UInt16(data[0]) | (UInt16(data[1]) << 8)
+    return Double(humidityRaw)
 }
 
 func decodeBatteryLevel(from hexString: String) -> Int? {
-    guard let data = Data(hexString: hexString), data.count == 1 else { return nil }
-    let batteryValue = data[0]
-    return Int(batteryValue)
+    guard let data = Data(hexString: hexString), data.count >= 1 else { return nil }
+    
+    // Battery level is typically sent as a single byte (0-100%)
+    return Int(data[0])
 }
 
 // MARK: - Air Quality Functions
@@ -170,6 +196,25 @@ func convertTemperature(_ temp: Double, toCelsius: Bool) -> Double {
     } else {
         return temp * 9/5 + 32
     }
+}
+
+// MARK: - BLE Encoding Functions
+func encodeMeasurementInterval(_ interval: Int) -> Data {
+    // Encode measurement interval as 16-bit unsigned integer (little-endian)
+    var intervalValue = UInt16(interval)
+    return Data(bytes: &intervalValue, count: MemoryLayout<UInt16>.size)
+}
+
+func encodeTemperatureUnit(_ isCelsius: Bool) -> Data {
+    // Encode temperature unit as single byte (0 = Celsius, 1 = Fahrenheit)
+    let unitValue: UInt8 = isCelsius ? 0 : 1
+    return Data([unitValue])
+}
+
+func encodeCO2AlertThreshold(_ threshold: Double) -> Data {
+    // Encode CO2 threshold as 16-bit unsigned integer (little-endian)
+    var thresholdValue = UInt16(threshold)
+    return Data(bytes: &thresholdValue, count: MemoryLayout<UInt16>.size)
 }
 
 // MARK: - Data Extensions
