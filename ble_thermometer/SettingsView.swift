@@ -37,6 +37,24 @@ struct SettingsView: View {
             .scrollDismissesKeyboard(.interactively)
             // Single keyboard toolbar for the whole screen
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Menu {
+                        if bleManager.connectedPeripherals.isEmpty {
+                            Text("No devices connected")
+                        } else {
+                            ForEach(bleManager.connectedPeripherals, id: \.identifier) { p in
+                                Button(action: { bleManager.setActivePeripheral(p) }) {
+                                    Label(p.name ?? "Unknown", systemImage: bleManager.activePeripheral?.identifier == p.identifier ? "checkmark.circle.fill" : "circle")
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "dot.radiowaves.left.and.right")
+                            Text("Devices")
+                        }
+                    }
+                }
                 ToolbarItemGroup(placement: .keyboard) {
                     if ppmFieldFocused {
                         Spacer()

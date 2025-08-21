@@ -26,7 +26,7 @@ struct HomeView: View {
                 }
                 .padding()
             }
-            .navigationTitle("Air Quality")
+            .navigationTitle(bleManager.activeDeviceDisplayName())
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -34,6 +34,24 @@ struct HomeView: View {
                         showingDeviceInfo = true
                     } label: {
                         Image(systemName: "info.circle")
+                    }
+                }
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Menu {
+                        if bleManager.connectedPeripherals.isEmpty {
+                            Text("No devices connected")
+                        } else {
+                            ForEach(bleManager.connectedPeripherals, id: \.identifier) { p in
+                                Button(action: { bleManager.setActivePeripheral(p) }) {
+                                    Label(p.name ?? "Unknown", systemImage: bleManager.activePeripheral?.identifier == p.identifier ? "checkmark.circle.fill" : "circle")
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "dot.radiowaves.left.and.right")
+                            Text("Devices")
+                        }
                     }
                 }
             }

@@ -6,6 +6,7 @@ struct HistoryView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \SensorReading.timestamp, order: .reverse) private var readings: [SensorReading]
     @Query private var userSettings: [UserSettings]
+    @ObservedObject var bleManager: BLEManager
     @State private var selectedTimeRange: HistoryTimeRange = .day
     @State private var selectedMetric: SensorMetric = .co2
     
@@ -28,7 +29,11 @@ struct HistoryView: View {
             cutoffDate = Calendar.current.date(byAdding: .month, value: -1, to: now) ?? now
         }
         
-        return readings.filter { $0.timestamp >= cutoffDate }
+        let timeFiltered = readings.filter { $0.timestamp >= cutoffDate }
+        if let activeId = bleManager.activePeripheral?.identifier.uuidString {
+            return timeFiltered.filter { $0.deviceId == activeId }
+        }
+        return timeFiltered
     }
     
     var body: some View {
@@ -82,6 +87,26 @@ struct HistoryView: View {
             }
             .navigationTitle("History")
             .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Menu {
+                        if bleManager.connectedPeripherals.isEmpty {
+                            Text("No devices connected")
+                        } else {
+                            ForEach(bleManager.connectedPeripherals, id: \.identifier) { p in
+                                Button(action: { bleManager.setActivePeripheral(p) }) {
+                                    Label(p.name ?? "Unknown", systemImage: bleManager.activePeripheral?.identifier == p.identifier ? "checkmark.circle.fill" : "circle")
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "dot.radiowaves.left.and.right")
+                            Text("Devices")
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -461,6 +486,6 @@ private func formatTemperatureForUser(_ temp: Double, _ isCelsius: Bool, userUni
 }
 
 #Preview {
-    HistoryView()
+    HistoryView(bleManager: BLEManager())
         .modelContainer(for: [SensorReading.self])
 }

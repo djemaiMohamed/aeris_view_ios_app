@@ -30,7 +30,7 @@ struct ContentView: View {
                         }
                         .tag(0)
                     
-                    HistoryView()
+                    HistoryView(bleManager: bleManager)
                         .tabItem {
                             Image(systemName: "chart.line.uptrend.xyaxis")
                             Text("History")

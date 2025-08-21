@@ -42,13 +42,18 @@ final class SensorReading {
     var temperature: Double
     var humidity: Double
     var isCelsius: Bool
+    // Multi-device support: tag each reading with the device identifier and optional name
+    var deviceId: String = ""
+    var deviceName: String = ""
     
-    init(timestamp: Date = Date(), co2Value: Double, temperature: Double, humidity: Double, isCelsius: Bool = true) {
+    init(timestamp: Date = Date(), co2Value: Double, temperature: Double, humidity: Double, isCelsius: Bool = true, deviceId: String = "", deviceName: String = "") {
         self.timestamp = timestamp
         self.co2Value = co2Value
         self.temperature = temperature
         self.humidity = humidity
         self.isCelsius = isCelsius
+        self.deviceId = deviceId
+        self.deviceName = deviceName
     }
 }
 

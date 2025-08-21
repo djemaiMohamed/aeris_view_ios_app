@@ -5,6 +5,14 @@ import SwiftUI
 import Foundation
 
 class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate {
+    // Per-device state for multi-device support
+    struct DeviceSnapshot {
+        var co2: Double = 0
+        var temp: Double = 0
+        var hum: Double = 0
+        var isCelsius: Bool = true
+        var battery: Int = 0
+    }
 
     // MARK: - Published Properties
     @Published var isBluetoothEnabled = false // Tracks Bluetooth state
@@ -12,6 +20,9 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     // bondedPeripheral is used to reconnect to previously bonded devices
     @Published var bondedPeripheral: CBPeripheral? // Previously bonded peripheral
     @Published var connectedPeripheral: CBPeripheral? // Currently connected peripheral
+    // Multi-device support
+    @Published var connectedPeripherals: [CBPeripheral] = [] // All connected peripherals
+    @Published var activePeripheral: CBPeripheral? // Peripheral currently shown in UI
     @Published var isBonded: Bool = false // Tracks bonding status
     @Published var co2Value: Double = 0.0 // Last CO2 value received (PPM)
     @Published var tempValue: Double = 0.0 // Last temperature value received (degrees)
@@ -26,6 +37,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     @Published var calibrationInProgress: Bool = false
     @Published var calibrationFinished: Bool = false
     @Published var calibrationStatusMessage: String = ""
+    // Store last known values per device so we can swap views instantly
+    private var deviceSnapshots: [UUID: DeviceSnapshot] = [:]
     
     // MARK: - BLE Core Properties
     var centralManager: CBCentralManager!
@@ -200,6 +213,10 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         DispatchQueue.main.async {
             self.connectedPeripheral = peripheral
+            if !self.connectedPeripherals.contains(where: { $0.identifier == peripheral.identifier }) {
+                self.connectedPeripherals.append(peripheral)
+            }
+            if self.activePeripheral == nil { self.activePeripheral = peripheral }
             self.isConnecting = false
             self.connectionStatus = "Connected"
             peripheral.discoverServices(nil) // discover all services to find custom calibration characteristic
@@ -212,6 +229,10 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             self.connectedPeripheral = nil
             self.isConnecting = false
             self.connectionStatus = "Disconnected"
+            self.connectedPeripherals.removeAll { $0.identifier == peripheral.identifier }
+            if self.activePeripheral?.identifier == peripheral.identifier {
+                self.activePeripheral = self.connectedPeripherals.first
+            }
             
             // Clean up completion handlers for this peripheral
             self.readValueCompletion.removeAll()
@@ -290,33 +311,43 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         // Assume bonding is complete when value is received
         isBonded = true
 
+        // Ensure we have a snapshot object for this peripheral
+        var snapshot = deviceSnapshots[peripheral.identifier] ?? DeviceSnapshot()
+
         // Parse and assign characteristic values using proper decoding functions
         switch characteristic.uuid {
         case co2CharUUID:
             if let decodedValue = decodeCO2Measurement(from: stringValue) {
-                co2Value = decodedValue
+                snapshot.co2 = decodedValue
+                if peripheral.identifier == activePeripheral?.identifier { co2Value = decodedValue }
                 print("CO2 decoded: \(decodedValue) PPM")
             } else {
                 print("Failed to decode CO2 value from: \(stringValue)")
             }
         case tempCharUUID:
             if let decodedTemp = decodeTemperatureMeasurement(from: stringValue) {
-                tempValue = decodedTemp.temperature
-                isTempCelsius = decodedTemp.isCelsius
+                snapshot.temp = decodedTemp.temperature
+                snapshot.isCelsius = decodedTemp.isCelsius
+                if peripheral.identifier == activePeripheral?.identifier {
+                    tempValue = decodedTemp.temperature
+                    isTempCelsius = decodedTemp.isCelsius
+                }
                 print("Temperature decoded: \(decodedTemp.temperature)° \(decodedTemp.isCelsius ? "C" : "F")")
             } else {
                 print("Failed to decode temperature value from: \(stringValue)")
             }
         case humCharUUID:
             if let decodedValue = decodeHumidityMeasurement(from: stringValue) {
-                humValue = decodedValue
+                snapshot.hum = decodedValue
+                if peripheral.identifier == activePeripheral?.identifier { humValue = decodedValue }
                 print("Humidity decoded: \(decodedValue)%")
             } else {
                 print("Failed to decode humidity value from: \(stringValue)")
             }
         case batteryLevelUUID:
             if let decodedValue = decodeBatteryLevel(from: stringValue) {
-                batteryLevel = decodedValue
+                snapshot.battery = decodedValue
+                if peripheral.identifier == activePeripheral?.identifier { batteryLevel = decodedValue }
                 print("Battery level decoded: \(decodedValue)%")
             } else {
                 print("Failed to decode battery level from: \(stringValue)")
@@ -342,8 +373,11 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         case tempUnitCharUUID:
             print("Temperature unit updated: \(stringValue)")
             if let tempUnit = decodeTemperatureUnit(from: stringValue) {
-                isTempCelsius = (tempUnit == 0)
-                print("Temperature unit set to \(isTempCelsius ? "Celsius" : "Fahrenheit")")
+                snapshot.isCelsius = (tempUnit == 0)
+                if peripheral.identifier == activePeripheral?.identifier {
+                    isTempCelsius = (tempUnit == 0)
+                    print("Temperature unit set to \(isTempCelsius ? "Celsius" : "Fahrenheit")")
+                }
             } else {
                 print("Failed to decode temperature unit from: \(stringValue)")
             }
@@ -363,14 +397,21 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             break
         }
         
-        // Update air quality level based on CO2 values
-        updateAirQualityLevel()
+    // Persist snapshot
+    deviceSnapshots[peripheral.identifier] = snapshot
+
+    // Update air quality level based on CO2 values only for active device
+        if peripheral.identifier == activePeripheral?.identifier {
+            updateAirQualityLevel()
+        }
         
-        // Save sensor reading to database
-        saveSensorReading()
+        // Save sensor reading to database with device context
+        saveSensorReading(peripheral: peripheral)
         
-        // Handle notifications for air quality changes
-        handleAirQualityNotifications()
+        // Handle notifications for air quality changes (active device only)
+        if peripheral.identifier == activePeripheral?.identifier {
+            handleAirQualityNotifications()
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -397,7 +438,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     private var lastSaveTime: Date = Date()
     private let minimumSaveInterval: TimeInterval = 60 // Save at most once per minute
     
-    private func saveSensorReading() {
+    private func saveSensorReading(peripheral: CBPeripheral) {
         guard let context = modelContext else { return }
         
         // Throttle database saves to improve performance
@@ -408,7 +449,9 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             co2Value: co2Value,
             temperature: tempValue,
             humidity: humValue,
-            isCelsius: isTempCelsius
+            isCelsius: isTempCelsius,
+            deviceId: peripheral.identifier.uuidString,
+            deviceName: peripheral.name ?? "Unknown"
         )
         
         context.insert(reading)
@@ -540,7 +583,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     
     /// Writes measurement interval to the connected BLE device
     func writeMeasurementInterval(_ interval: Int) {
-        guard let peripheral = connectedPeripheral,
+        let target = activePeripheral ?? connectedPeripheral
+        guard let peripheral = target,
               peripheral.state == .connected else {
             print("No connected peripheral to write measurement interval")
             return
@@ -567,7 +611,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     
     /// Writes temperature unit to the connected BLE device
     func writeTemperatureUnit(_ isCelsius: Bool) {
-        guard let peripheral = connectedPeripheral,
+        let target = activePeripheral ?? connectedPeripheral
+        guard let peripheral = target,
               peripheral.state == .connected else {
             print("No connected peripheral to write temperature unit")
             return
@@ -594,7 +639,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
     /// Starts CO2 calibration by writing the reference PPM to the calibration characteristic
     func startCO2Calibration(ppm: Int) {
-        guard let peripheral = connectedPeripheral, peripheral.state == .connected else {
+        let target = activePeripheral ?? connectedPeripheral
+        guard let peripheral = target, peripheral.state == .connected else {
             print("No connected peripheral to start calibration")
             return
         }
@@ -635,6 +681,23 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     
     var displayTemperatureUnit: TemperatureUnit {
         return userSettings?.temperatureUnit ?? .celsius
+    }
+
+    // MARK: - Multi-device helpers
+    func setActivePeripheral(_ peripheral: CBPeripheral) {
+        activePeripheral = peripheral
+        if let snapshot = deviceSnapshots[peripheral.identifier] {
+            co2Value = snapshot.co2
+            tempValue = snapshot.temp
+            humValue = snapshot.hum
+            isTempCelsius = snapshot.isCelsius
+            batteryLevel = snapshot.battery
+            updateAirQualityLevel()
+        }
+    }
+    
+    func activeDeviceDisplayName() -> String {
+        activePeripheral?.name ?? "Air Quality"
     }
     
     // MARK: - Testing/Debug Methods
