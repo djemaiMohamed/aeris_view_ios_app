@@ -5,6 +5,7 @@ struct HomeView: View {
     @ObservedObject var bleManager: BLEManager
     @State private var selectedTimeRange: TimeRange = .hour
     @State private var showingDeviceInfo = false
+    @State private var showingAddDevice = false
     
     var body: some View {
         NavigationView {
@@ -36,6 +37,14 @@ struct HomeView: View {
                         Image(systemName: "info.circle")
                     }
                 }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        showingAddDevice = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .accessibilityLabel("Add Device")
+                }
                 ToolbarItem(placement: .navigationBarLeading) {
                     Menu {
                         if bleManager.connectedPeripherals.isEmpty {
@@ -57,6 +66,9 @@ struct HomeView: View {
             }
             .sheet(isPresented: $showingDeviceInfo) {
                 DeviceInfoView(bleManager: bleManager)
+            }
+            .sheet(isPresented: $showingAddDevice) {
+                DevicePairingView(bleManager: bleManager, autoStartScan: true)
             }
         }
     }

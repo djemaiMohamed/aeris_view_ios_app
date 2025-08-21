@@ -4,6 +4,8 @@ import CoreBluetooth
 struct DevicePairingView: View {
     @ObservedObject var bleManager: BLEManager
     @State private var isScanning = false
+    var autoStartScan: Bool = false
+    @Environment(\.dismiss) private var dismiss
     
     var body: some View {
         NavigationView {
@@ -124,6 +126,36 @@ struct DevicePairingView: View {
                 .padding(.bottom, 30)
             }
             .navigationBarHidden(true)
+            .onAppear {
+                if autoStartScan && !isScanning {
+                    bleManager.startScan()
+                    isScanning = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+                        if isScanning {
+                            bleManager.stopScan()
+                            isScanning = false
+                        }
+                    }
+                }
+            }
+            .onDisappear {
+                if isScanning {
+                    bleManager.stopScan()
+                    isScanning = false
+                }
+            }
+            .onChange(of: bleManager.connectedPeripheral) { newValue in
+                if newValue != nil {
+                    // Stop scanning and dismiss after brief delay
+                    if isScanning {
+                        bleManager.stopScan()
+                        isScanning = false
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                        dismiss()
+                    }
+                }
+            }
         }
     }
 }
