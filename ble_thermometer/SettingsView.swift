@@ -9,6 +9,7 @@ struct SettingsView: View {
     @State private var showingMeasurementIntervalPicker = false
     @State private var showingTemperatureUnitPicker = false
     @State private var showingCO2ThresholdSlider = false
+    @FocusState private var ppmFieldFocused: Bool
     
     private var currentSettings: UserSettings {
         if let settings = userSettings.first {
@@ -23,158 +24,202 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             List {
-                // Device Settings Section
-                Section("Device Settings") {
-                    NavigationLink {
-                        MeasurementIntervalView(
-                            settings: currentSettings,
-                            onIntervalChanged: { newInterval in
-                                bleManager.writeMeasurementInterval(newInterval)
-                            }
-                        )
-                    } label: {
-                        SettingsRow(
-                            icon: "clock.fill",
-                            title: "Measurement Interval",
-                            value: "\(currentSettings.measurementInterval)s",
-                            color: .blue
-                        )
-                    }
-                    
-                    NavigationLink {
-                        TemperatureUnitView(
-                            settings: currentSettings,
-                            onUnitChanged: { newUnit in
-                                bleManager.writeTemperatureUnit(newUnit == .celsius)
-                            }
-                        )
-                    } label: {
-                        SettingsRow(
-                            icon: "thermometer",
-                            title: "Temperature Unit",
-                            value: currentSettings.temperatureUnit.rawValue,
-                            color: .orange
-                        )
-                    }
-                    
-                    NavigationLink {
-                        CO2ThresholdView(settings: currentSettings)
-                    } label: {
-                        SettingsRow(
-                            icon: "exclamationmark.triangle.fill",
-                            title: "CO2 Alert Threshold",
-                            value: "\(Int(currentSettings.co2AlertThreshold)) PPM",
-                            color: .red
-                        )
-                    }
-                }
-                
-                // Notifications Section
-                Section("Notifications") {
-                    Toggle(isOn: Binding(
-                        get: { currentSettings.notificationsEnabled },
-                        set: { newValue in
-                            currentSettings.notificationsEnabled = newValue
-                            try? modelContext.save()
-                        }
-                    )) {
-                        SettingsRow(
-                            icon: "bell.fill",
-                            title: "Air Quality Alerts",
-                            value: nil,
-                            color: .purple
-                        )
-                    }
-                    
-                    if currentSettings.notificationsEnabled {
-                        Button("Test Notification") {
-                            testNotification()
-                        }
-                        .foregroundColor(.blue)
-                    }
-                }
-                
-                // Device Management Section
-                Section("Device Management") {
-                    if bleManager.isBonded {
-                        SettingsRow(
-                            icon: batteryIcon(for: bleManager.batteryLevel),
-                            title: "Battery Level",
-                            value: "\(bleManager.batteryLevel)%",
-                            color: batteryColor(for: bleManager.batteryLevel)
-                        )
-                        
-                        Button {
-                            bleManager.forgetBondedDevice()
-                        } label: {
-                            SettingsRow(
-                                icon: "wifi.slash",
-                                title: "Forget This Device",
-                                value: bleManager.connectedPeripheral?.name ?? "N/A",
-                                color: .red
-                            )
-                        }
-                    } else {
-                        Text("No device bonded.")
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    NavigationLink {
-                        DeviceInfoView(bleManager: bleManager)
-                    } label: {
-                        SettingsRow(
-                            icon: "info.circle.fill",
-                            title: "Device Information",
-                            value: nil,
-                            color: .gray
-                        )
-                    }
-                }
-                
-                // Data Management Section
-                Section("Data Management") {
-                    NavigationLink {
-                        DataExportView()
-                    } label: {
-                        SettingsRow(
-                            icon: "square.and.arrow.up.fill",
-                            title: "Export Data",
-                            value: nil,
-                            color: .green
-                        )
-                    }
-                    
-                    Button {
-                        clearAllData()
-                    } label: {
-                        SettingsRow(
-                            icon: "trash.fill",
-                            title: "Clear All Data",
-                            value: nil,
-                            color: .red
-                        )
-                    }
-                }
-                
-                // About Section
-                Section("About") {
-                    SettingsRow(
-                        icon: "info.circle.fill",
-                        title: "Version",
-                        value: "1.0.0",
-                        color: .gray
-                    )
-                    
-                    SettingsRow(
-                        icon: "person.fill",
-                        title: "Developer",
-                        value: "Mohamed Djemai",
-                        color: .blue
-                    )
-                }
+                DeviceSettingsSectionView(bleManager: bleManager, settings: currentSettings)
+                CalibrationSectionView(bleManager: bleManager, ppmFieldFocused: $ppmFieldFocused)
+                NotificationsSectionView(settings: currentSettings)
+                DeviceManagementSectionView(bleManager: bleManager)
+                DataManagementSectionView()
+                AboutSectionView()
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.large)
+            // Allow dismissing the keyboard by scrolling the list
+            .scrollDismissesKeyboard(.interactively)
+            // Single keyboard toolbar for the whole screen
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    if ppmFieldFocused {
+                        Spacer()
+                        Button("Done") { ppmFieldFocused = false }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Section-specific helpers moved into subviews
+}
+
+// MARK: - Section Subviews
+
+private struct DeviceSettingsSectionView: View {
+    @ObservedObject var bleManager: BLEManager
+    var settings: UserSettings
+    
+    var body: some View {
+        Section("Device Settings") {
+            NavigationLink {
+                MeasurementIntervalView(
+                    settings: settings,
+                    onIntervalChanged: { newInterval in
+                        bleManager.writeMeasurementInterval(newInterval)
+                    }
+                )
+            } label: {
+                SettingsRow(
+                    icon: "clock.fill",
+                    title: "Measurement Interval",
+                    value: "\(settings.measurementInterval)s",
+                    color: .blue
+                )
+            }
+            
+            NavigationLink {
+                TemperatureUnitView(
+                    settings: settings,
+                    onUnitChanged: { newUnit in
+                        bleManager.writeTemperatureUnit(newUnit == .celsius)
+                    }
+                )
+            } label: {
+                SettingsRow(
+                    icon: "thermometer",
+                    title: "Temperature Unit",
+                    value: settings.temperatureUnit.rawValue,
+                    color: .orange
+                )
+            }
+            
+            NavigationLink {
+                CO2ThresholdView(settings: settings)
+            } label: {
+                SettingsRow(
+                    icon: "exclamationmark.triangle.fill",
+                    title: "CO2 Alert Threshold",
+                    value: "\(Int(settings.co2AlertThreshold)) PPM",
+                    color: .red
+                )
+            }
+        }
+    }
+}
+
+private struct CalibrationSectionView: View {
+    @ObservedObject var bleManager: BLEManager
+    @State private var ppmText: String = "400"
+    @State private var showWarning: Bool = false
+    @State private var showFinished: Bool = false
+    var ppmFieldFocused: FocusState<Bool>.Binding
+    
+    var body: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: "aqi.medium")
+                        .foregroundColor(.orange)
+                        .frame(width: 24)
+                    Text("CO₂ Reference (PPM)")
+                        .foregroundColor(.primary)
+                    Spacer()
+                    TextField("400", text: $ppmText)
+                        .keyboardType(.numberPad)
+                        .multilineTextAlignment(.trailing)
+                        .frame(minWidth: 80)
+                        .focused(ppmFieldFocused)
+                        .submitLabel(.done)
+                        .onSubmit { ppmFieldFocused.wrappedValue = false }
+                        .onChange(of: ppmText) { newValue in
+                            let filtered = newValue.filter { $0.isNumber }
+                            if filtered != newValue { ppmText = filtered }
+                        }
+                }
+                Text("Default is 400 PPM (fresh outdoor air). Adjust if you have a more accurate reference.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+
+            Button(action: {
+                if ppmText.isEmpty { ppmText = "400" }
+                showWarning = true
+            }) {
+                HStack(spacing: 8) {
+                    if bleManager.calibrationInProgress { ProgressView() }
+                    Text(bleManager.calibrationInProgress ? "Calibrating…" : "Start Calibration")
+                }
+            }
+            .disabled(bleManager.connectedPeripheral == nil || bleManager.calibrationInProgress)
+
+            if !bleManager.calibrationStatusMessage.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: bleManager.calibrationFinished ? "checkmark.circle.fill" : (bleManager.calibrationInProgress ? "hourglass" : "info.circle"))
+                        .foregroundColor(bleManager.calibrationFinished ? .green : (bleManager.calibrationInProgress ? .orange : .secondary))
+                    Text(bleManager.calibrationStatusMessage)
+                        .font(.subheadline)
+                        .foregroundColor(bleManager.calibrationFinished ? .green : .secondary)
+                }
+            }
+        } header: {
+            Text("Calibration")
+        } footer: {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
+                    Text("Place the device outdoors in fresh air before starting. Using an incorrect reference may degrade accuracy.")
+                }
+                Text("Tip: 400 PPM is typical outdoors. If possible, use a verified value from a high-accuracy instrument.")
+                    .foregroundColor(.secondary)
+            }
+            .font(.footnote)
+        }
+        .alert("Important: Outdoor Calibration", isPresented: $showWarning) {
+            Button("Cancel", role: .cancel) {}
+            Button("I Understand") {
+                let ppm = Int(ppmText) ?? 400
+                let clamped = max(300, min(ppm, 5000))
+                ppmText = String(clamped)
+                bleManager.startCO2Calibration(ppm: clamped)
+            }
+        } message: {
+            Text("Ensure the device is outdoors in fresh air. Calibration takes about 3 minutes. For best results, use an accurate reference value if available.")
+        }
+        .onChange(of: bleManager.calibrationFinished) { finished in
+            if finished { showFinished = true }
+        }
+        .alert("Calibration Complete", isPresented: $showFinished) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("The device reported calibration finished successfully.")
+        }
+    }
+}
+
+private struct NotificationsSectionView: View {
+    @Environment(\.modelContext) private var modelContext
+    var settings: UserSettings
+    
+    var body: some View {
+        Section("Notifications") {
+            Toggle(isOn: Binding(
+                get: { settings.notificationsEnabled },
+                set: { newValue in
+                    settings.notificationsEnabled = newValue
+                    try? modelContext.save()
+                }
+            )) {
+                SettingsRow(
+                    icon: "bell.fill",
+                    title: "Air Quality Alerts",
+                    value: nil,
+                    color: .purple
+                )
+            }
+            
+            if settings.notificationsEnabled {
+                Button("Test Notification") {
+                    testNotification()
+                }
+                .foregroundColor(.blue)
+            }
         }
     }
     
@@ -193,13 +238,46 @@ struct SettingsView: View {
             }
         }
     }
+}
+
+private struct DeviceManagementSectionView: View {
+    @ObservedObject var bleManager: BLEManager
     
-    private func clearAllData() {
-        do {
-            try modelContext.delete(model: SensorReading.self)
-            try modelContext.save()
-        } catch {
-            print("Error clearing data: \(error)")
+    var body: some View {
+        Section("Device Management") {
+            if bleManager.isBonded {
+                SettingsRow(
+                    icon: batteryIcon(for: bleManager.batteryLevel),
+                    title: "Battery Level",
+                    value: "\(bleManager.batteryLevel)%",
+                    color: batteryColor(for: bleManager.batteryLevel)
+                )
+                
+                Button {
+                    bleManager.forgetBondedDevice()
+                } label: {
+                    SettingsRow(
+                        icon: "wifi.slash",
+                        title: "Forget This Device",
+                        value: bleManager.connectedPeripheral?.name ?? "N/A",
+                        color: .red
+                    )
+                }
+            } else {
+                Text("No device bonded.")
+                    .foregroundColor(.secondary)
+            }
+            
+            NavigationLink {
+                DeviceInfoView(bleManager: bleManager)
+            } label: {
+                SettingsRow(
+                    icon: "info.circle.fill",
+                    title: "Device Information",
+                    value: nil,
+                    color: .gray
+                )
+            }
         }
     }
     
@@ -220,6 +298,65 @@ struct SettingsView: View {
         case 26...50: return "battery.25"
         case 1...25: return "battery.0"
         default: return "battery.0"
+        }
+    }
+}
+
+private struct DataManagementSectionView: View {
+    @Environment(\.modelContext) private var modelContext
+    
+    var body: some View {
+        Section("Data Management") {
+            NavigationLink {
+                DataExportView()
+            } label: {
+                SettingsRow(
+                    icon: "square.and.arrow.up.fill",
+                    title: "Export Data",
+                    value: nil,
+                    color: .green
+                )
+            }
+            
+            Button {
+                clearAllData()
+            } label: {
+                SettingsRow(
+                    icon: "trash.fill",
+                    title: "Clear All Data",
+                    value: nil,
+                    color: .red
+                )
+            }
+        }
+    }
+    
+    private func clearAllData() {
+        do {
+            try modelContext.delete(model: SensorReading.self)
+            try modelContext.save()
+        } catch {
+            print("Error clearing data: \(error)")
+        }
+    }
+}
+
+private struct AboutSectionView: View {
+    var body: some View {
+        Section("About") {
+            SettingsRow(
+                icon: "info.circle.fill",
+                title: "Version",
+                value: "1.0.0",
+                color: .gray
+            )
+            
+            SettingsRow(
+                icon: "person.fill",
+                title: "Developer",
+                value: "Mohamed Djemai",
+                color: .blue
+            )
         }
     }
 }

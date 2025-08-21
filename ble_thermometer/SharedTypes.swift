@@ -217,6 +217,12 @@ func encodeCO2AlertThreshold(_ threshold: Double) -> Data {
     return Data(bytes: &thresholdValue, count: MemoryLayout<UInt16>.size)
 }
 
+/// Encodes a CO₂ calibration reference PPM as 16-bit little-endian
+func encodeCO2CalibrationPPM(_ ppm: Int) -> Data {
+    var value = UInt16(ppm)
+    return Data(bytes: &value, count: MemoryLayout<UInt16>.size)
+}
+
 // MARK: - Data Extensions
 extension Data {
     init?(hexString: String) {

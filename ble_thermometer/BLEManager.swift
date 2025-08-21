@@ -23,6 +23,9 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     @Published var airQualityLevel: AirQualityLevel = .excellent
     @Published var lastUpdateTime: Date = Date()
     @Published var batteryLevel: Int = 0 // Battery level percentage (0-100)
+    @Published var calibrationInProgress: Bool = false
+    @Published var calibrationFinished: Bool = false
+    @Published var calibrationStatusMessage: String = ""
     
     // MARK: - BLE Core Properties
     var centralManager: CBCentralManager!
@@ -46,6 +49,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     let measurementIntervalUUID = CBUUID(string: "2A21")
     let tempUnitCharUUID = CBUUID(string: "123c7dfe-ede3-4889-84c5-c0382a32df05") // Temperature Unit Characteristic
     let batteryLevelUUID = CBUUID(string: "2A19") // Battery Level Characteristic
+    let calibrationCharUUID = CBUUID(string: "bf40623a-300b-4793-b4ad-7a9970f6732d") // CO2 Calibration Characteristic
 
     override init() {
         super.init()
@@ -78,6 +82,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         characteristicNameCache[co2CharUUID] = "CO2 Measurement"
         characteristicNameCache[CBUUID(string: "2A19")] = "Battery Level"
         characteristicNameCache[CBUUID(string: "2A00")] = "Device Name"
+    characteristicNameCache[calibrationCharUUID] = "CO2 Calibration"
     }
 
     func getCharacteristicName(uuid: CBUUID) -> String {
@@ -135,7 +140,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     func discoverServices(for peripheral: CBPeripheral, completion: @escaping ([CBService]) -> Void) {
         peripheral.delegate = self
         serviceDiscoveryCompletion = completion
-        peripheral.discoverServices([targetServiceUUID, batteryServiceUUID])
+        peripheral.discoverServices(nil) // discover all services
     }
 
     func setNotifyValue(_ enabled: Bool, for characteristic: CBCharacteristic, of peripheral: CBPeripheral) {
@@ -197,7 +202,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             self.connectedPeripheral = peripheral
             self.isConnecting = false
             self.connectionStatus = "Connected"
-            peripheral.discoverServices([self.targetServiceUUID, self.batteryServiceUUID])
+            peripheral.discoverServices(nil) // discover all services to find custom calibration characteristic
             print("🔗 Connected to \(peripheral.name ?? "Unknown Device")")
         }
     }
@@ -261,7 +266,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             if characteristic.uuid == co2CharUUID ||
                 characteristic.uuid == tempCharUUID ||
                 characteristic.uuid == humCharUUID ||
-                characteristic.uuid == batteryLevelUUID {
+                characteristic.uuid == batteryLevelUUID ||
+                characteristic.uuid == calibrationCharUUID {
                 peripheral.setNotifyValue(true, for: characteristic)
             }
 
@@ -340,6 +346,18 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                 print("Temperature unit set to \(isTempCelsius ? "Celsius" : "Fahrenheit")")
             } else {
                 print("Failed to decode temperature unit from: \(stringValue)")
+            }
+        case calibrationCharUUID:
+            // Device sends 0x01 when calibration finishes
+            if data.count >= 1, data[0] == 0x01 {
+                DispatchQueue.main.async {
+                    self.calibrationInProgress = false
+                    self.calibrationFinished = true
+                    self.calibrationStatusMessage = "Calibration finished."
+                }
+                print("✅ Calibration finished notification received")
+            } else {
+                print("Calibration characteristic updated: \(stringValue)")
             }
         default:
             break
@@ -572,6 +590,35 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             }
         }
         print("❌ Temperature unit characteristic not found")
+    }
+
+    /// Starts CO2 calibration by writing the reference PPM to the calibration characteristic
+    func startCO2Calibration(ppm: Int) {
+        guard let peripheral = connectedPeripheral, peripheral.state == .connected else {
+            print("No connected peripheral to start calibration")
+            return
+        }
+        calibrationFinished = false
+        calibrationInProgress = true
+        calibrationStatusMessage = "Calibration started. Keep device outdoors in fresh air."
+        // Find characteristic
+        guard let services = peripheral.services else {
+            print("No services discovered yet")
+            return
+        }
+        for service in services {
+            guard let characteristics = service.characteristics else { continue }
+            for characteristic in characteristics where characteristic.uuid == calibrationCharUUID {
+                var value = UInt16(ppm)
+                let data = Data(bytes: &value, count: MemoryLayout<UInt16>.size)
+                writeValue(for: characteristic, of: peripheral, value: data)
+                print("🧭 Starting calibration with reference \(ppm) PPM")
+                return
+            }
+        }
+        print("❌ Calibration characteristic not found")
+        calibrationStatusMessage = "Calibration characteristic not found."
+        calibrationInProgress = false
     }
     
     // MARK: - Computed Properties for User Preferences
