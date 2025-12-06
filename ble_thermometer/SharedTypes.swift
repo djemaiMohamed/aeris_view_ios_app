@@ -73,8 +73,9 @@ struct SensorSample {
     let timestamp: Date       // Computed absolute timestamp (epoch_actual + uptime_sec)
     let co2: Int16
     let temperatureC: Int16   // Celsius (raw value, divide by 100 for actual)
-    let humidity: Int16       // Raw value, divide by 100 for actual percentage
-    let flags: UInt8          // 0 = live, 1 = historical
+    let humidity: Int16       // Raw value - whole percentage (e.g., 20 = 20%)
+    let flags: UInt8          // 0 = live, 1 = historical, 2 = sync end marker
+    let battery: UInt8        // Battery percentage (only valid for live data, flags=0)
     
     var isHistorical: Bool {
         return flags == 1
@@ -84,13 +85,17 @@ struct SensorSample {
         return flags == 0
     }
     
+    var isSyncEndMarker: Bool {
+        return flags == 2
+    }
+    
     /// Convert to SensorReading for database storage
     func toSensorReading(deviceId: String = "", deviceName: String = "") -> SensorReading {
         return SensorReading(
             timestamp: timestamp,
             co2Value: Double(co2),
             temperature: Double(temperatureC) / 100.0,
-            humidity: Double(humidity) / 100.0,
+            humidity: Double(humidity),  // Already whole percentage
             isCelsius: true,
             deviceId: deviceId,
             deviceName: deviceName
