@@ -37,6 +37,16 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     @Published var calibrationInProgress: Bool = false
     @Published var calibrationFinished: Bool = false
     @Published var calibrationStatusMessage: String = ""
+    
+    // MARK: - Sync Properties
+    @Published var syncState: SyncState = .idle
+    @Published var lastSyncTimestamp: Date? = nil  // Persisted in UserDefaults
+    private var syncTimeoutTimer: Timer?
+    private var syncReceivedCount: Int = 0
+    private var lastSyncNotificationTime: Date?
+    private let syncTimeoutInterval: TimeInterval = 1.0  // Complete sync when no notification for 1 second
+    private var deviceEpochOffset: TimeInterval = 0  // Device's epoch offset for timestamp calculation
+    
     // Store last known values per device so we can swap views instantly
     private var deviceSnapshots: [UUID: DeviceSnapshot] = [:]
     
@@ -63,12 +73,14 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     let tempUnitCharUUID = CBUUID(string: "123c7dfe-ede3-4889-84c5-c0382a32df05") // Temperature Unit Characteristic
     let batteryLevelUUID = CBUUID(string: "2A19") // Battery Level Characteristic
     let calibrationCharUUID = CBUUID(string: "bf40623a-300b-4793-b4ad-7a9970f6732d") // CO2 Calibration Characteristic
+    let syncDataCharUUID = CBUUID(string: "475f3487-c251-4fbe-b006-37eba1d6c42e") // Sync Data ID Characteristic
 
     override init() {
         super.init()
         centralManager = CBCentralManager(delegate: self, queue: nil)
         loadCharacteristicNames()
         requestNotificationPermission()
+        loadLastSyncTimestamp()
     }
     
     func setModelContext(_ context: ModelContext) {
@@ -95,7 +107,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         characteristicNameCache[co2CharUUID] = "CO2 Measurement"
         characteristicNameCache[CBUUID(string: "2A19")] = "Battery Level"
         characteristicNameCache[CBUUID(string: "2A00")] = "Device Name"
-    characteristicNameCache[calibrationCharUUID] = "CO2 Calibration"
+        characteristicNameCache[calibrationCharUUID] = "CO2 Calibration"
+        characteristicNameCache[syncDataCharUUID] = "Sync Data"
     }
 
     func getCharacteristicName(uuid: CBUUID) -> String {
@@ -288,7 +301,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                 characteristic.uuid == tempCharUUID ||
                 characteristic.uuid == humCharUUID ||
                 characteristic.uuid == batteryLevelUUID ||
-                characteristic.uuid == calibrationCharUUID {
+                characteristic.uuid == calibrationCharUUID ||
+                characteristic.uuid == syncDataCharUUID {
                 peripheral.setNotifyValue(true, for: characteristic)
             }
 
@@ -393,6 +407,9 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             } else {
                 print("Calibration characteristic updated: \(stringValue)")
             }
+        case syncDataCharUUID:
+            // Handle sync data notifications (both historical and live samples)
+            handleSyncDataNotification(data: data, peripheral: peripheral)
         default:
             break
         }
@@ -732,5 +749,282 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         if let context = modelContext {
             cleanupOldReadings(context: context)
         }
+    }
+    
+    // MARK: - Sync Data Methods
+    
+    /// Load last sync timestamp from UserDefaults
+    private func loadLastSyncTimestamp() {
+        if let timestamp = UserDefaults.standard.object(forKey: "lastSyncTimestamp") as? Date {
+            lastSyncTimestamp = timestamp
+            print("📅 Loaded last sync timestamp: \(timestamp)")
+        }
+    }
+    
+    /// Save last sync timestamp to UserDefaults
+    private func saveLastSyncTimestamp(_ timestamp: Date) {
+        lastSyncTimestamp = timestamp
+        UserDefaults.standard.set(timestamp, forKey: "lastSyncTimestamp")
+        print("📅 Saved last sync timestamp: \(timestamp)")
+    }
+    
+    /// Request historical/missed data from the device
+    /// - Parameter lastSync: Optional last sync timestamp. If nil, uses stored value or requests all data
+    func requestSyncData(lastSync: Date? = nil) {
+        let target = activePeripheral ?? connectedPeripheral
+        guard let peripheral = target, peripheral.state == .connected else {
+            print("❌ No connected peripheral to request sync data")
+            DispatchQueue.main.async {
+                self.syncState = .failed(message: "No connected device")
+            }
+            return
+        }
+        
+        // Find the sync data characteristic
+        guard let services = peripheral.services else {
+            print("❌ No services discovered yet")
+            DispatchQueue.main.async {
+                self.syncState = .failed(message: "Services not discovered")
+            }
+            return
+        }
+        
+        for service in services {
+            guard let characteristics = service.characteristics else { continue }
+            for characteristic in characteristics where characteristic.uuid == syncDataCharUUID {
+                // Prepare sync data (8 bytes)
+                let syncData = encodeSyncDataRequest(lastSync: lastSync)
+                
+                // Reset sync state
+                DispatchQueue.main.async {
+                    self.syncReceivedCount = 0
+                    self.syncState = .syncing(progress: 0, receivedCount: 0)
+                    self.lastSyncNotificationTime = Date()
+                }
+                
+                // Write the sync request
+                writeValue(for: characteristic, of: peripheral, value: syncData)
+                print("📤 Sync data request sent")
+                
+                // Start timeout timer
+                startSyncTimeoutTimer()
+                return
+            }
+        }
+        
+        print("❌ Sync data characteristic not found")
+        DispatchQueue.main.async {
+            self.syncState = .failed(message: "Sync characteristic not found")
+        }
+    }
+    
+    /// Encode sync data request as 8 bytes
+    /// - MSB (bytes 0-3): Current device absolute timestamp (Unix epoch)
+    /// - LSB (bytes 4-7): Last sync timestamp (Unix epoch)
+    private func encodeSyncDataRequest(lastSync: Date? = nil) -> Data {
+        var data = Data(count: 8)
+        
+        // Current timestamp (big-endian for MSB)
+        let currentTimestamp = UInt32(Date().timeIntervalSince1970)
+        data[0] = UInt8((currentTimestamp >> 24) & 0xFF)
+        data[1] = UInt8((currentTimestamp >> 16) & 0xFF)
+        data[2] = UInt8((currentTimestamp >> 8) & 0xFF)
+        data[3] = UInt8(currentTimestamp & 0xFF)
+        
+        // Last sync timestamp (big-endian for LSB, or 0 if never synced)
+        let syncTimestamp = lastSync ?? lastSyncTimestamp ?? Date(timeIntervalSince1970: 0)
+        let lastSyncEpoch = UInt32(syncTimestamp.timeIntervalSince1970)
+        data[4] = UInt8((lastSyncEpoch >> 24) & 0xFF)
+        data[5] = UInt8((lastSyncEpoch >> 16) & 0xFF)
+        data[6] = UInt8((lastSyncEpoch >> 8) & 0xFF)
+        data[7] = UInt8(lastSyncEpoch & 0xFF)
+        
+        print("📤 Sync request - Current: \(currentTimestamp), LastSync: \(lastSyncEpoch)")
+        
+        // Store the epoch offset for computing absolute timestamps
+        deviceEpochOffset = Date().timeIntervalSince1970 - Double(currentTimestamp)
+        
+        return data
+    }
+    
+    /// Handle sync data notifications from the device
+    private func handleSyncDataNotification(data: Data, peripheral: CBPeripheral) {
+        // Parse the sensor sample from the notification data
+        guard let sample = decodeSensorSample(from: data) else {
+            print("⚠️ Failed to decode sensor sample from sync notification")
+            return
+        }
+        
+        // Update last notification time for timeout tracking
+        lastSyncNotificationTime = Date()
+        
+        // Increment received count
+        syncReceivedCount += 1
+        
+        // Update sync state with progress
+        DispatchQueue.main.async {
+            // Progress is indeterminate for historical data, just show count
+            self.syncState = .syncing(progress: 0, receivedCount: self.syncReceivedCount)
+        }
+        
+        // Restart timeout timer
+        startSyncTimeoutTimer()
+        
+        // Process the sample
+        if sample.isHistorical {
+            print("📥 Historical sample #\(syncReceivedCount): CO2=\(sample.co2), Temp=\(Double(sample.temperatureC)/100.0)°C, Hum=\(Double(sample.humidity)/100.0)%, Time=\(sample.timestamp)")
+            
+            // Save historical sample to database
+            saveHistoricalSample(sample, peripheral: peripheral)
+        } else {
+            print("📡 Live sample: CO2=\(sample.co2), Temp=\(Double(sample.temperatureC)/100.0)°C, Hum=\(Double(sample.humidity)/100.0)%")
+            
+            // Update live values
+            updateLiveValues(from: sample, peripheral: peripheral)
+        }
+        
+        // Update last sync timestamp to the sample's timestamp
+        if sample.timestamp > (lastSyncTimestamp ?? Date.distantPast) {
+            saveLastSyncTimestamp(sample.timestamp)
+        }
+    }
+    
+    /// Decode a sensor sample from notification data
+    /// Expected format: [uptime_sec(4)][co2(2)][temp(2)][humidity(2)][flags(1)] = 11 bytes minimum
+    private func decodeSensorSample(from data: Data) -> SensorSample? {
+        guard data.count >= 11 else {
+            print("⚠️ Sync data too short: \(data.count) bytes (expected 11+)")
+            return nil
+        }
+        
+        // Parse uptime in seconds (4 bytes, big-endian)
+        let uptimeSec = UInt32(data[0]) << 24 |
+                        UInt32(data[1]) << 16 |
+                        UInt32(data[2]) << 8 |
+                        UInt32(data[3])
+        
+        // Parse CO2 (2 bytes, little-endian)
+        let co2 = Int16(data[4]) | (Int16(data[5]) << 8)
+        
+        // Parse temperature (2 bytes, little-endian, in centidegrees Celsius)
+        let tempRaw = Int16(bitPattern: UInt16(data[6]) | (UInt16(data[7]) << 8))
+        
+        // Parse humidity (2 bytes, little-endian, in centipercent)
+        let humRaw = Int16(bitPattern: UInt16(data[8]) | (UInt16(data[9]) << 8))
+        
+        // Parse flags (1 byte)
+        let flags = data[10]
+        
+        // Compute absolute timestamp: current epoch time when sync was requested + uptime offset
+        // The device sends its uptime, we compute the absolute timestamp using the epoch offset
+        let absoluteTimestamp = Date(timeIntervalSince1970: deviceEpochOffset + Double(uptimeSec))
+        
+        return SensorSample(
+            timestamp: absoluteTimestamp,
+            co2: co2,
+            temperatureC: tempRaw,
+            humidity: humRaw,
+            flags: flags
+        )
+    }
+    
+    /// Save a historical sample to the database
+    private func saveHistoricalSample(_ sample: SensorSample, peripheral: CBPeripheral) {
+        guard let context = modelContext else { return }
+        
+        let reading = sample.toSensorReading(
+            deviceId: peripheral.identifier.uuidString,
+            deviceName: peripheral.name ?? "Unknown"
+        )
+        
+        context.insert(reading)
+        
+        // Batch save every 50 samples for performance
+        if syncReceivedCount % 50 == 0 {
+            do {
+                try context.save()
+                print("💾 Saved batch of historical readings (\(syncReceivedCount) total)")
+            } catch {
+                print("❌ Failed to save historical readings: \(error)")
+            }
+        }
+    }
+    
+    /// Update live sensor values from a sample
+    private func updateLiveValues(from sample: SensorSample, peripheral: CBPeripheral) {
+        var snapshot = deviceSnapshots[peripheral.identifier] ?? DeviceSnapshot()
+        
+        snapshot.co2 = Double(sample.co2)
+        snapshot.temp = Double(sample.temperatureC) / 100.0
+        snapshot.hum = Double(sample.humidity) / 100.0
+        snapshot.isCelsius = true
+        
+        deviceSnapshots[peripheral.identifier] = snapshot
+        
+        if peripheral.identifier == activePeripheral?.identifier {
+            DispatchQueue.main.async {
+                self.co2Value = snapshot.co2
+                self.tempValue = snapshot.temp
+                self.humValue = snapshot.hum
+                self.isTempCelsius = snapshot.isCelsius
+                self.updateAirQualityLevel()
+            }
+        }
+    }
+    
+    /// Start or restart the sync timeout timer
+    private func startSyncTimeoutTimer() {
+        // Invalidate existing timer
+        syncTimeoutTimer?.invalidate()
+        
+        // Create new timer on main thread
+        DispatchQueue.main.async {
+            self.syncTimeoutTimer = Timer.scheduledTimer(withTimeInterval: self.syncTimeoutInterval, repeats: false) { [weak self] _ in
+                self?.handleSyncTimeout()
+            }
+        }
+    }
+    
+    /// Handle sync timeout (no notification received for 1 second)
+    private func handleSyncTimeout() {
+        syncTimeoutTimer?.invalidate()
+        syncTimeoutTimer = nil
+        
+        // Final save of any remaining samples
+        if let context = modelContext {
+            do {
+                try context.save()
+                print("💾 Final save of historical readings completed")
+            } catch {
+                print("❌ Failed to save final historical readings: \(error)")
+            }
+        }
+        
+        DispatchQueue.main.async {
+            if self.syncReceivedCount > 0 {
+                self.syncState = .completed(totalReceived: self.syncReceivedCount)
+                print("✅ Sync completed: \(self.syncReceivedCount) samples received")
+            } else {
+                // No samples received - either up to date or no historical data
+                self.syncState = .completed(totalReceived: 0)
+                print("✅ Sync completed: Device is up to date (no historical data)")
+            }
+        }
+    }
+    
+    /// Cancel an ongoing sync operation
+    func cancelSync() {
+        syncTimeoutTimer?.invalidate()
+        syncTimeoutTimer = nil
+        
+        DispatchQueue.main.async {
+            self.syncState = .idle
+        }
+        print("🛑 Sync cancelled")
+    }
+    
+    /// Check if sync is currently in progress
+    var isSyncing: Bool {
+        return syncState.isSyncing
     }
 }

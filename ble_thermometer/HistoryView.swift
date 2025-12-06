@@ -148,7 +148,33 @@ struct HistoryView: View {
                         }
                     }
                 }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: {
+                        bleManager.requestSyncData()
+                    }) {
+                        if bleManager.syncState.isSyncing {
+                            ProgressView()
+                                .progressViewStyle(CircularProgressViewStyle())
+                        } else {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                        }
+                    }
+                    .disabled(bleManager.connectedPeripheral == nil || bleManager.syncState.isSyncing)
+                }
             }
+            .overlay(alignment: .bottom) {
+                // Sync status overlay
+                if case .syncing(_, let count) = bleManager.syncState {
+                    SyncProgressBanner(receivedCount: count)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                } else if case .completed(let total) = bleManager.syncState {
+                    SyncCompletedBanner(totalReceived: total) {
+                        bleManager.syncState = .idle
+                    }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.easeInOut(duration: 0.3), value: bleManager.syncState)
             .onAppear {
                 updateFilteredReadings()
             }
@@ -846,6 +872,86 @@ private func formatTime(_ date: Date) -> String {
     let formatter = DateFormatter()
     formatter.timeStyle = .short
     return formatter.string(from: date)
+}
+
+// MARK: - Sync Progress Banner
+struct SyncProgressBanner: View {
+    let receivedCount: Int
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            ProgressView()
+                .progressViewStyle(CircularProgressViewStyle(tint: .white))
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Syncing Historical Data")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.white)
+                
+                Text("\(receivedCount) samples received")
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.8))
+            }
+            
+            Spacer()
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.blue)
+                .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
+        )
+        .padding(.horizontal)
+        .padding(.bottom, 8)
+    }
+}
+
+// MARK: - Sync Completed Banner
+struct SyncCompletedBanner: View {
+    let totalReceived: Int
+    let onDismiss: () -> Void
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.title2)
+                .foregroundColor(.white)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Sync Complete")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.white)
+                
+                Text(totalReceived > 0 ? "\(totalReceived) samples synced" : "Already up to date")
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.8))
+            }
+            
+            Spacer()
+            
+            Button(action: onDismiss) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title3)
+                    .foregroundColor(.white.opacity(0.7))
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.green)
+                .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
+        )
+        .padding(.horizontal)
+        .padding(.bottom, 8)
+        .onAppear {
+            // Auto-dismiss after 3 seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                onDismiss()
+            }
+        }
+    }
 }
 
 private func formatDate(_ date: Date) -> String {

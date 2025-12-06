@@ -68,6 +68,49 @@ struct TemperatureReading {
     }
 }
 
+/// Represents a sensor sample received from the device (both live and historical)
+struct SensorSample {
+    let timestamp: Date       // Computed absolute timestamp (epoch_actual + uptime_sec)
+    let co2: Int16
+    let temperatureC: Int16   // Celsius (raw value, divide by 100 for actual)
+    let humidity: Int16       // Raw value, divide by 100 for actual percentage
+    let flags: UInt8          // 0 = live, 1 = historical
+    
+    var isHistorical: Bool {
+        return flags == 1
+    }
+    
+    var isLive: Bool {
+        return flags == 0
+    }
+    
+    /// Convert to SensorReading for database storage
+    func toSensorReading(deviceId: String = "", deviceName: String = "") -> SensorReading {
+        return SensorReading(
+            timestamp: timestamp,
+            co2Value: Double(co2),
+            temperature: Double(temperatureC) / 100.0,
+            humidity: Double(humidity) / 100.0,
+            isCelsius: true,
+            deviceId: deviceId,
+            deviceName: deviceName
+        )
+    }
+}
+
+/// Sync state for tracking historical data synchronization
+enum SyncState: Equatable {
+    case idle
+    case syncing(progress: Double, receivedCount: Int)
+    case completed(totalReceived: Int)
+    case failed(message: String)
+    
+    var isSyncing: Bool {
+        if case .syncing = self { return true }
+        return false
+    }
+}
+
 @Model
 final class UserSettings: ObservableObject {
     var measurementInterval: Int // in seconds
