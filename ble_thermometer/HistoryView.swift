@@ -2,62 +2,210 @@ import SwiftUI
 import SwiftData
 import Charts
 
+// MARK: - Optimized Data Manager for Lazy Loading
+class HistoryDataManager: ObservableObject {
+    @Published var visibleReadings: [SensorReading] = []
+    @Published var isLoading: Bool = false
+    @Published var totalCount: Int = 0
+    @Published var visibleWindow: (start: Date, end: Date)?
+    
+    private var allReadingsCache: [SensorReading] = []
+    private var modelContext: ModelContext?
+    private var deviceId: String?
+    
+    // Window size for visible data (number of points to load at once)
+    private let windowSize: Int = 100
+    
+    func configure(context: ModelContext, deviceId: String?) {
+        self.modelContext = context
+        self.deviceId = deviceId
+    }
+    
+    /// Fetch readings for a specific time range with optimized loading
+    func fetchReadings(for timeRange: HistoryTimeRange, deviceId: String?) async {
+        await MainActor.run { isLoading = true }
+        
+        let now = Date()
+        let startDate = timeRange.startDate(from: now)
+        
+        guard let context = modelContext else {
+            await MainActor.run { isLoading = false }
+            return
+        }
+        
+        // Build predicate for time range and device
+        var predicate: Predicate<SensorReading>
+        if let deviceId = deviceId {
+            predicate = #Predicate<SensorReading> { reading in
+                reading.timestamp >= startDate && reading.deviceId == deviceId
+            }
+        } else {
+            predicate = #Predicate<SensorReading> { reading in
+                reading.timestamp >= startDate
+            }
+        }
+        
+        let descriptor = FetchDescriptor<SensorReading>(
+            predicate: predicate,
+            sortBy: [SortDescriptor(\.timestamp, order: .forward)]
+        )
+        
+        do {
+            let readings = try context.fetch(descriptor)
+            
+            // Downsample if too many points
+            let downsampled = downsample(readings, maxPoints: 300)
+            
+            await MainActor.run {
+                self.allReadingsCache = downsampled
+                self.totalCount = readings.count
+                
+                // Initially show the last portion of data (most recent)
+                self.loadWindowAtEnd()
+                self.isLoading = false
+            }
+        } catch {
+            print("Failed to fetch readings: \(error)")
+            await MainActor.run { isLoading = false }
+        }
+    }
+    
+    /// Load a window of data centered around a specific date
+    func loadWindow(around date: Date) {
+        guard !allReadingsCache.isEmpty else { return }
+        
+        // Find the index closest to the date
+        let targetIndex = allReadingsCache.firstIndex { $0.timestamp >= date } ?? allReadingsCache.count - 1
+        
+        // Calculate window bounds
+        let halfWindow = windowSize / 2
+        let startIndex = max(0, targetIndex - halfWindow)
+        let endIndex = min(allReadingsCache.count, startIndex + windowSize)
+        
+        visibleReadings = Array(allReadingsCache[startIndex..<endIndex])
+        
+        if let first = visibleReadings.first, let last = visibleReadings.last {
+            visibleWindow = (start: first.timestamp, end: last.timestamp)
+        }
+    }
+    
+    /// Load the most recent data (end of the dataset)
+    func loadWindowAtEnd() {
+        guard !allReadingsCache.isEmpty else {
+            visibleReadings = []
+            return
+        }
+        
+        let startIndex = max(0, allReadingsCache.count - windowSize)
+        visibleReadings = Array(allReadingsCache[startIndex...])
+        
+        if let first = visibleReadings.first, let last = visibleReadings.last {
+            visibleWindow = (start: first.timestamp, end: last.timestamp)
+        }
+    }
+    
+    /// Load earlier data (scroll left)
+    func loadEarlierData() {
+        guard !allReadingsCache.isEmpty, let currentWindow = visibleWindow else { return }
+        
+        // Find current start index
+        guard let currentStartIndex = allReadingsCache.firstIndex(where: { $0.timestamp >= currentWindow.start }) else { return }
+        
+        // Already at the beginning
+        if currentStartIndex == 0 { return }
+        
+        // Load previous window
+        let newStartIndex = max(0, currentStartIndex - windowSize / 2)
+        let newEndIndex = min(allReadingsCache.count, newStartIndex + windowSize)
+        
+        visibleReadings = Array(allReadingsCache[newStartIndex..<newEndIndex])
+        
+        if let first = visibleReadings.first, let last = visibleReadings.last {
+            visibleWindow = (start: first.timestamp, end: last.timestamp)
+        }
+    }
+    
+    /// Load later data (scroll right)
+    func loadLaterData() {
+        guard !allReadingsCache.isEmpty, let currentWindow = visibleWindow else { return }
+        
+        // Find current end index
+        guard let currentEndIndex = allReadingsCache.lastIndex(where: { $0.timestamp <= currentWindow.end }) else { return }
+        
+        // Already at the end
+        if currentEndIndex >= allReadingsCache.count - 1 { return }
+        
+        // Load next window
+        let newEndIndex = min(allReadingsCache.count, currentEndIndex + windowSize / 2 + 1)
+        let newStartIndex = max(0, newEndIndex - windowSize)
+        
+        visibleReadings = Array(allReadingsCache[newStartIndex..<newEndIndex])
+        
+        if let first = visibleReadings.first, let last = visibleReadings.last {
+            visibleWindow = (start: first.timestamp, end: last.timestamp)
+        }
+    }
+    
+    /// Check if more data is available in each direction
+    var canLoadEarlier: Bool {
+        guard let window = visibleWindow, let first = allReadingsCache.first else { return false }
+        return first.timestamp < window.start
+    }
+    
+    var canLoadLater: Bool {
+        guard let window = visibleWindow, let last = allReadingsCache.last else { return false }
+        return last.timestamp > window.end
+    }
+    
+    /// Get all cached readings for statistics (doesn't load into visible)
+    var allReadings: [SensorReading] {
+        return allReadingsCache
+    }
+    
+    /// Downsample readings using LTTB-like algorithm for performance
+    private func downsample(_ readings: [SensorReading], maxPoints: Int) -> [SensorReading] {
+        guard readings.count > maxPoints else { return readings }
+        
+        let step = Double(readings.count) / Double(maxPoints)
+        var result: [SensorReading] = []
+        result.reserveCapacity(maxPoints)
+        
+        for i in 0..<maxPoints {
+            let index = Int(Double(i) * step)
+            if index < readings.count {
+                result.append(readings[index])
+            }
+        }
+        
+        // Always include the last reading
+        if let last = readings.last, result.last?.id != last.id {
+            result.append(last)
+        }
+        
+        return result
+    }
+}
+
 struct HistoryView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \SensorReading.timestamp, order: .reverse) private var readings: [SensorReading]
     @Query private var userSettings: [UserSettings]
     @ObservedObject var bleManager: BLEManager
+    @StateObject private var dataManager = HistoryDataManager()
+    
     @State private var selectedTimeRange: HistoryTimeRange = .day
     @State private var selectedMetric: SensorMetric = .co2
-    
-    // Cached filtered readings for performance
-    @State private var cachedReadings: [SensorReading] = []
-    @State private var lastCacheUpdate: Date = .distantPast
-    @State private var isLoading: Bool = false
     
     private var currentSettings: UserSettings {
         userSettings.first ?? UserSettings()
     }
     
-    // Optimized filtered readings with caching
-    private func updateFilteredReadings() {
-        isLoading = true
-        
-        DispatchQueue.global(qos: .userInitiated).async {
-            let now = Date()
-            let cutoffDate: Date
-            
-            switch selectedTimeRange {
-            case .hour:
-                cutoffDate = Calendar.current.date(byAdding: .hour, value: -1, to: now) ?? now
-            case .day:
-                cutoffDate = Calendar.current.date(byAdding: .day, value: -1, to: now) ?? now
-            case .week:
-                cutoffDate = Calendar.current.date(byAdding: .weekOfYear, value: -1, to: now) ?? now
-            case .month:
-                cutoffDate = Calendar.current.date(byAdding: .month, value: -1, to: now) ?? now
-            }
-            
-            var timeFiltered = readings.filter { $0.timestamp >= cutoffDate }
-            if let activeId = bleManager.activePeripheral?.identifier.uuidString {
-                timeFiltered = timeFiltered.filter { $0.deviceId == activeId }
-            }
-            
-            // Downsample for large datasets (keep max ~200 points for performance)
-            let maxPoints = 200
-            let result: [SensorReading]
-            if timeFiltered.count > maxPoints {
-                let step = timeFiltered.count / maxPoints
-                result = stride(from: 0, to: timeFiltered.count, by: step).map { timeFiltered[$0] }
-            } else {
-                result = timeFiltered
-            }
-            
-            DispatchQueue.main.async {
-                cachedReadings = result
-                lastCacheUpdate = now
-                isLoading = false
-            }
+    private func refreshData() {
+        dataManager.configure(context: modelContext, deviceId: bleManager.activePeripheral?.identifier.uuidString)
+        Task {
+            await dataManager.fetchReadings(
+                for: selectedTimeRange,
+                deviceId: bleManager.activePeripheral?.identifier.uuidString
+            )
         }
     }
     
@@ -73,10 +221,10 @@ struct HistoryView: View {
                 .pickerStyle(SegmentedPickerStyle())
                 .padding()
                 .onChange(of: selectedTimeRange) { _, _ in
-                    updateFilteredReadings()
+                    refreshData()
                 }
                 
-                if isLoading {
+                if dataManager.isLoading {
                     VStack(spacing: 16) {
                         ProgressView()
                             .scaleEffect(1.2)
@@ -85,7 +233,7 @@ struct HistoryView: View {
                             .foregroundColor(.secondary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if cachedReadings.isEmpty {
+                } else if dataManager.visibleReadings.isEmpty {
                     // Empty State
                     VStack(spacing: 20) {
                         Image(systemName: "chart.line.uptrend.xyaxis")
@@ -109,19 +257,26 @@ struct HistoryView: View {
                             // Metric Selector
                             MetricSelectorCard(selectedMetric: $selectedMetric)
                             
-                            // Chart Card
-                            ChartCard(
-                                readings: cachedReadings,
+                            // Optimized Chart Card with navigation
+                            OptimizedChartCard(
+                                dataManager: dataManager,
                                 metric: selectedMetric,
                                 userSettings: currentSettings,
                                 timeRange: selectedTimeRange
                             )
                             
-                            // Statistics Card
-                            StatisticsCard(readings: cachedReadings, metric: selectedMetric, userSettings: currentSettings)
+                            // Statistics Card (uses all data for accurate stats)
+                            StatisticsCard(
+                                readings: dataManager.allReadings,
+                                metric: selectedMetric,
+                                userSettings: currentSettings
+                            )
                             
-                            // Recent Readings List
-                            RecentReadingsCard(readings: Array(cachedReadings.prefix(10)), userSettings: currentSettings)
+                            // Recent Readings List (only show last 10)
+                            RecentReadingsCard(
+                                readings: Array(dataManager.visibleReadings.suffix(10).reversed()),
+                                userSettings: currentSettings
+                            )
                         }
                         .padding()
                     }
@@ -170,21 +325,307 @@ struct HistoryView: View {
                 } else if case .completed(let total) = bleManager.syncState {
                     SyncCompletedBanner(totalReceived: total) {
                         bleManager.syncState = .idle
+                        refreshData() // Refresh after sync completes
                     }
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
             .animation(.easeInOut(duration: 0.3), value: bleManager.syncState)
             .onAppear {
-                updateFilteredReadings()
-            }
-            .onChange(of: readings.count) { _, _ in
-                updateFilteredReadings()
+                refreshData()
             }
             .onChange(of: bleManager.activePeripheral?.identifier) { _, _ in
-                updateFilteredReadings()
+                refreshData()
+            }
+            .onChange(of: bleManager.syncState) { oldValue, newValue in
+                // Refresh data when sync completes
+                if case .completed = newValue {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        refreshData()
+                    }
+                }
             }
         }
+    }
+}
+
+// MARK: - Optimized Chart Card with Navigation
+struct OptimizedChartCard: View {
+    @ObservedObject var dataManager: HistoryDataManager
+    let metric: SensorMetric
+    let userSettings: UserSettings
+    let timeRange: HistoryTimeRange
+    
+    // Sorted readings for proper chart display
+    private var sortedReadings: [SensorReading] {
+        dataManager.visibleReadings.sorted { $0.timestamp < $1.timestamp }
+    }
+    
+    // Calculate Y-axis range for the metric
+    private var yAxisRange: (min: Double, max: Double) {
+        let values = sortedReadings.map { metric.getValue(from: $0, userSettings: userSettings) }.filter { $0 > 0 }
+        guard !values.isEmpty else {
+            return metric.defaultRange
+        }
+        let minVal = values.min() ?? 0
+        let maxVal = values.max() ?? 100
+        let padding = (maxVal - minVal) * 0.1
+        return (min: max(0, minVal - padding), max: maxVal + padding)
+    }
+    
+    // Y-axis values for display
+    private var yAxisValues: [Double] {
+        let range = yAxisRange
+        let step = (range.max - range.min) / 5
+        guard step > 0 else {
+            let value = range.min
+            if value == 0 { return [0, 20, 40, 60, 80, 100] }
+            let padding = max(value * 0.2, 1)
+            let artificialStep = (padding * 2) / 5
+            return stride(from: value - padding, through: value + padding, by: artificialStep).map { $0 }
+        }
+        return stride(from: range.min, through: range.max, by: step).map { $0 }
+    }
+    
+    // Y-axis unit label
+    private var yAxisLabel: String {
+        switch metric {
+        case .co2: return "CO₂ (ppm)"
+        case .temperature: 
+            return userSettings.temperatureUnit == .celsius ? "Temp (°C)" : "Temp (°F)"
+        case .humidity: return "Humidity (%)"
+        }
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Header with data info
+            HStack {
+                Image(systemName: metric.iconName)
+                    .font(.title3)
+                    .foregroundColor(metric.color)
+                
+                Text("\(metric.displayName) Over Time")
+                    .font(.headline)
+                
+                Spacer()
+                
+                // Data point count badge
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("\(sortedReadings.count) visible")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    if dataManager.totalCount > sortedReadings.count {
+                        Text("of \(dataManager.totalCount) total")
+                            .font(.caption2)
+                            .foregroundColor(.secondary.opacity(0.7))
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color(.systemGray6))
+                .cornerRadius(8)
+            }
+            
+            // Navigation buttons
+            HStack(spacing: 12) {
+                Button(action: { dataManager.loadEarlierData() }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                        Text("Earlier")
+                    }
+                    .font(.caption)
+                    .foregroundColor(dataManager.canLoadEarlier ? .blue : .gray)
+                }
+                .disabled(!dataManager.canLoadEarlier)
+                
+                Spacer()
+                
+                // Time window indicator
+                if let window = dataManager.visibleWindow {
+                    Text(formatTimeWindow(window))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                Button(action: { dataManager.loadLaterData() }) {
+                    HStack(spacing: 4) {
+                        Text("Later")
+                        Image(systemName: "chevron.right")
+                    }
+                    .font(.caption)
+                    .foregroundColor(dataManager.canLoadLater ? .blue : .gray)
+                }
+                .disabled(!dataManager.canLoadLater)
+            }
+            .padding(.horizontal, 4)
+            
+            // Chart with Y-axis
+            HStack(alignment: .top, spacing: 0) {
+                // Fixed Y-axis
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text(yAxisLabel)
+                        .font(.system(size: 8, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .frame(height: 16)
+                    
+                    GeometryReader { geometry in
+                        let height = geometry.size.height
+                        let stepHeight = yAxisValues.count > 1 ? height / CGFloat(yAxisValues.count - 1) : height
+                        
+                        ZStack(alignment: .topTrailing) {
+                            ForEach(Array(yAxisValues.reversed().enumerated()), id: \.offset) { index, value in
+                                Text(formatYAxisValue(value))
+                                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                    .position(x: 20, y: CGFloat(index) * stepHeight)
+                            }
+                        }
+                    }
+                    .frame(height: 200)
+                }
+                .frame(width: 45)
+                .padding(.trailing, 4)
+                
+                // Chart
+                chartContent
+                    .frame(height: 200)
+            }
+            
+            // Time range and jump to end button
+            HStack {
+                Image(systemName: "clock")
+                    .font(.caption2)
+                Text(timeRangeDescription)
+                    .font(.caption2)
+                Spacer()
+                
+                if dataManager.canLoadLater {
+                    Button(action: { dataManager.loadWindowAtEnd() }) {
+                        HStack(spacing: 4) {
+                            Text("Jump to Latest")
+                            Image(systemName: "arrow.right.to.line")
+                        }
+                        .font(.caption2)
+                        .foregroundColor(.blue)
+                    }
+                }
+            }
+            .foregroundColor(.secondary)
+        }
+        .padding()
+        .background(Color(.systemBackground))
+        .cornerRadius(16)
+        .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 2)
+    }
+    
+    private var timeRangeDescription: String {
+        switch timeRange {
+        case .hour: return "Last 60 minutes"
+        case .day: return "Last 24 hours"
+        case .week: return "Last 7 days"
+        case .month: return "Last 30 days"
+        }
+    }
+    
+    private func formatTimeWindow(_ window: (start: Date, end: Date)) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, HH:mm"
+        return "\(formatter.string(from: window.start)) - \(formatter.string(from: window.end))"
+    }
+    
+    private var chartContent: some View {
+        Chart(sortedReadings) { reading in
+            let value = metric.getValue(from: reading, userSettings: userSettings)
+            if value > 0 {
+                AreaMark(
+                    x: .value("Time", reading.timestamp),
+                    y: .value(metric.displayName, value)
+                )
+                .foregroundStyle(
+                    LinearGradient(
+                        gradient: Gradient(colors: [
+                            metric.color.opacity(0.25),
+                            metric.color.opacity(0.05)
+                        ]),
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .interpolationMethod(.catmullRom)
+                
+                LineMark(
+                    x: .value("Time", reading.timestamp),
+                    y: .value(metric.displayName, value)
+                )
+                .foregroundStyle(metric.color)
+                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                .interpolationMethod(.catmullRom)
+                
+                // Show points only if few data points
+                if sortedReadings.count <= 50 {
+                    PointMark(
+                        x: .value("Time", reading.timestamp),
+                        y: .value(metric.displayName, value)
+                    )
+                    .foregroundStyle(metric.color)
+                    .symbolSize(sortedReadings.count <= 20 ? 20 : 8)
+                }
+            }
+        }
+        .chartYScale(domain: yAxisRange.min...yAxisRange.max)
+        .chartYAxis(.hidden)
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 6)) { value in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2]))
+                    .foregroundStyle(Color.gray.opacity(0.3))
+                AxisTick(stroke: StrokeStyle(lineWidth: 1))
+                    .foregroundStyle(Color.gray.opacity(0.5))
+                AxisValueLabel(anchor: .top) {
+                    if let date = value.as(Date.self) {
+                        VStack(spacing: 1) {
+                            Text(formatXAxisTime(date))
+                                .font(.system(size: 8, weight: .medium))
+                            Text(formatXAxisDate(date))
+                                .font(.system(size: 7))
+                                .foregroundStyle(Color.secondary.opacity(0.8))
+                        }
+                        .foregroundStyle(Color.secondary)
+                    }
+                }
+            }
+        }
+        .chartPlotStyle { plotArea in
+            plotArea
+                .background(Color(.systemGray6).opacity(0.3))
+                .cornerRadius(8)
+        }
+    }
+    
+    private func formatYAxisValue(_ value: Double) -> String {
+        switch metric {
+        case .co2:
+            if value >= 1000 { return String(format: "%.1fk", value / 1000) }
+            return String(format: "%.0f", value)
+        case .temperature:
+            return String(format: "%.0f°", value)
+        case .humidity:
+            return String(format: "%.0f%%", value)
+        }
+    }
+    
+    private func formatXAxisTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
+    }
+    
+    private func formatXAxisDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter.string(from: date)
     }
 }
 
@@ -232,347 +673,6 @@ struct MetricSelectorCard: View {
         .background(Color(.systemBackground))
         .cornerRadius(16)
         .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 2)
-    }
-}
-
-struct ChartCard: View {
-    let readings: [SensorReading]
-    let metric: SensorMetric
-    let userSettings: UserSettings
-    let timeRange: HistoryTimeRange
-    
-    // Sorted readings for proper chart display
-    private var sortedReadings: [SensorReading] {
-        readings.sorted { $0.timestamp < $1.timestamp }
-    }
-    
-    // Calculate dynamic chart width based on data points and time range
-    private var chartWidth: CGFloat {
-        let baseWidth: CGFloat = UIScreen.main.bounds.width - 100 // Account for Y-axis
-        let pointWidth: CGFloat
-        
-        switch timeRange {
-        case .hour: pointWidth = 40
-        case .day: pointWidth = 30
-        case .week: pointWidth = 20
-        case .month: pointWidth = 15
-        }
-        
-        let calculatedWidth = CGFloat(sortedReadings.count) * pointWidth
-        return max(baseWidth, calculatedWidth)
-    }
-    
-    // Check if chart needs to scroll
-    private var needsScroll: Bool {
-        chartWidth > UIScreen.main.bounds.width - 100
-    }
-    
-    // Calculate Y-axis range for the metric
-    private var yAxisRange: (min: Double, max: Double) {
-        let values = sortedReadings.map { metric.getValue(from: $0, userSettings: userSettings) }.filter { $0 > 0 }
-        guard !values.isEmpty else {
-            return metric.defaultRange
-        }
-        let minVal = values.min() ?? 0
-        let maxVal = values.max() ?? 100
-        // Add 10% padding
-        let padding = (maxVal - minVal) * 0.1
-        return (min: max(0, minVal - padding), max: maxVal + padding)
-    }
-    
-    // Y-axis values for display
-    private var yAxisValues: [Double] {
-        let range = yAxisRange
-        let step = (range.max - range.min) / 5
-        
-        // Guard against zero step (when min == max)
-        guard step > 0 else {
-            // Return a single value or create artificial range
-            let value = range.min
-            if value == 0 {
-                return [0, 20, 40, 60, 80, 100]
-            }
-            // Create range around the single value (±20%)
-            let padding = max(value * 0.2, 1)
-            let artificialStep = (padding * 2) / 5
-            return stride(from: value - padding, through: value + padding, by: artificialStep).map { $0 }
-        }
-        
-        return stride(from: range.min, through: range.max, by: step).map { $0 }
-    }
-    
-    // Y-axis unit label
-    private var yAxisLabel: String {
-        switch metric {
-        case .co2: return "CO₂ (ppm)"
-        case .temperature: 
-            return userSettings.temperatureUnit == .celsius ? "Temp (°C)" : "Temp (°F)"
-        case .humidity: return "Humidity (%)"
-        }
-    }
-    
-    // Number of X-axis marks based on time range
-    private var xAxisMarkCount: Int {
-        switch timeRange {
-        case .hour: return 12   // Every 5 minutes
-        case .day: return 24    // Every hour
-        case .week: return 14   // Every 12 hours
-        case .month: return 30  // Every day
-        }
-    }
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Header
-            HStack {
-                Image(systemName: metric.iconName)
-                    .font(.title3)
-                    .foregroundColor(metric.color)
-                
-                Text("\(metric.displayName) Over Time")
-                    .font(.headline)
-                
-                Spacer()
-                
-                // Data point count badge
-                Text("\(sortedReadings.count) points")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color(.systemGray6))
-                    .cornerRadius(8)
-            }
-            
-            // Chart with sticky Y-axis
-            HStack(alignment: .top, spacing: 0) {
-                // Fixed Y-axis on the left
-                VStack(alignment: .trailing, spacing: 0) {
-                    // Y-axis label
-                    Text(yAxisLabel)
-                        .font(.system(size: 8, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .frame(height: 16)
-                    
-                    // Y-axis values
-                    GeometryReader { geometry in
-                        let height = geometry.size.height
-                        let stepHeight = height / CGFloat(yAxisValues.count - 1)
-                        
-                        ZStack(alignment: .topTrailing) {
-                            ForEach(Array(yAxisValues.reversed().enumerated()), id: \.offset) { index, value in
-                                Text(formatYAxisValue(value))
-                                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                                    .foregroundColor(.secondary)
-                                    .position(x: 20, y: CGFloat(index) * stepHeight)
-                            }
-                        }
-                    }
-                    .frame(height: 200)
-                }
-                .frame(width: 45)
-                .padding(.trailing, 4)
-                
-                // Scrollable chart area
-                VStack(spacing: 4) {
-                    if needsScroll {
-                        ScrollView(.horizontal, showsIndicators: true) {
-                            chartContent
-                                .frame(width: chartWidth, height: 200)
-                        }
-                        .scrollIndicators(.visible)
-                    } else {
-                        chartContent
-                            .frame(height: 200)
-                    }
-                    
-                    // Scroll hint
-                    if needsScroll {
-                        HStack(spacing: 4) {
-                            Spacer()
-                            Image(systemName: "arrow.left.arrow.right")
-                                .font(.system(size: 10))
-                            Text("Scroll for more")
-                                .font(.system(size: 10))
-                        }
-                        .foregroundColor(.secondary)
-                        .padding(.top, 2)
-                    }
-                }
-            }
-            
-            // Time range indicator
-            HStack {
-                Image(systemName: "clock")
-                    .font(.caption2)
-                Text(timeRangeDescription)
-                    .font(.caption2)
-                Spacer()
-                Text("Last updated: \(formatLastUpdate())")
-                    .font(.caption2)
-            }
-            .foregroundColor(.secondary)
-        }
-        .padding()
-        .background(Color(.systemBackground))
-        .cornerRadius(16)
-        .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 2)
-    }
-    
-    private var timeRangeDescription: String {
-        switch timeRange {
-        case .hour: return "Last 60 minutes"
-        case .day: return "Last 24 hours"
-        case .week: return "Last 7 days"
-        case .month: return "Last 30 days"
-        }
-    }
-    
-    private func formatLastUpdate() -> String {
-        guard let last = sortedReadings.last else { return "N/A" }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: last.timestamp, relativeTo: Date())
-    }
-    
-    private var chartContent: some View {
-        Chart(sortedReadings) { reading in
-            let value = metric.getValue(from: reading, userSettings: userSettings)
-            if value > 0 {
-                // Area fill with gradient
-                AreaMark(
-                    x: .value("Time", reading.timestamp),
-                    y: .value(metric.displayName, value)
-                )
-                .foregroundStyle(
-                    LinearGradient(
-                        gradient: Gradient(colors: [
-                            metric.color.opacity(0.25),
-                            metric.color.opacity(0.05)
-                        ]),
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .interpolationMethod(.catmullRom)
-                
-                // Main line
-                LineMark(
-                    x: .value("Time", reading.timestamp),
-                    y: .value(metric.displayName, value)
-                )
-                .foregroundStyle(metric.color)
-                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                .interpolationMethod(.catmullRom)
-                
-                // Data points (only show if not too many)
-                if sortedReadings.count <= 30 {
-                    PointMark(
-                        x: .value("Time", reading.timestamp),
-                        y: .value(metric.displayName, value)
-                    )
-                    .foregroundStyle(.white)
-                    .symbolSize(24)
-                    
-                    PointMark(
-                        x: .value("Time", reading.timestamp),
-                        y: .value(metric.displayName, value)
-                    )
-                    .foregroundStyle(metric.color)
-                    .symbolSize(12)
-                }
-            }
-        }
-        .chartYScale(domain: yAxisRange.min...yAxisRange.max)
-        .chartYAxis(.hidden) // Hide built-in Y-axis since we have custom sticky one
-        .chartXAxis {
-            AxisMarks(values: .automatic(desiredCount: xAxisMarkCount)) { value in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2]))
-                    .foregroundStyle(Color.gray.opacity(0.3))
-                AxisTick(stroke: StrokeStyle(lineWidth: 1))
-                    .foregroundStyle(Color.gray.opacity(0.5))
-                AxisValueLabel(anchor: .top) {
-                    if let date = value.as(Date.self) {
-                        VStack(spacing: 1) {
-                            Text(formatXAxisTime(date))
-                                .font(.system(size: 8, weight: .medium))
-                            if shouldShowDate(date) {
-                                Text(formatXAxisDate(date))
-                                    .font(.system(size: 7))
-                                    .foregroundStyle(Color.secondary.opacity(0.8))
-                            }
-                        }
-                        .foregroundStyle(Color.secondary)
-                    }
-                }
-            }
-        }
-        .chartPlotStyle { plotArea in
-            plotArea
-                .background(Color(.systemGray6).opacity(0.3))
-                .cornerRadius(8)
-        }
-    }
-    
-    // Format Y-axis values based on metric
-    private func formatYAxisValue(_ value: Double) -> String {
-        switch metric {
-        case .co2:
-            if value >= 1000 {
-                return String(format: "%.1fk", value / 1000)
-            }
-            return String(format: "%.0f", value)
-        case .temperature:
-            return String(format: "%.0f°", value)
-        case .humidity:
-            return String(format: "%.0f%%", value)
-        }
-    }
-    
-    // Format X-axis time
-    private func formatXAxisTime(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        
-        switch timeRange {
-        case .hour, .day:
-            formatter.dateFormat = "HH:mm"
-        case .week:
-            formatter.dateFormat = "HH:mm"
-        case .month:
-            formatter.dateFormat = "dd"
-        }
-        
-        return formatter.string(from: date)
-    }
-    
-    // Format X-axis date (shown below time for longer ranges)
-    private func formatXAxisDate(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        
-        switch timeRange {
-        case .hour:
-            return ""
-        case .day:
-            formatter.dateFormat = "MMM d"
-        case .week, .month:
-            formatter.dateFormat = "MMM d"
-        }
-        
-        return formatter.string(from: date)
-    }
-    
-    // Determine if date should be shown below time
-    private func shouldShowDate(_ date: Date) -> Bool {
-        switch timeRange {
-        case .hour:
-            return false
-        case .day:
-            // Show date at midnight or start/end
-            let hour = Calendar.current.component(.hour, from: date)
-            return hour == 0 || hour == 12
-        case .week, .month:
-            return true
-        }
     }
 }
 
@@ -789,6 +889,20 @@ enum HistoryTimeRange: CaseIterable {
         case .day: return "1D"
         case .week: return "1W"
         case .month: return "1M"
+        }
+    }
+    
+    /// Calculate the start date for this time range from a given reference date
+    func startDate(from date: Date) -> Date {
+        switch self {
+        case .hour:
+            return Calendar.current.date(byAdding: .hour, value: -1, to: date) ?? date
+        case .day:
+            return Calendar.current.date(byAdding: .day, value: -1, to: date) ?? date
+        case .week:
+            return Calendar.current.date(byAdding: .weekOfYear, value: -1, to: date) ?? date
+        case .month:
+            return Calendar.current.date(byAdding: .month, value: -1, to: date) ?? date
         }
     }
 }
