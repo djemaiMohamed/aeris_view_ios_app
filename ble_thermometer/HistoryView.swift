@@ -328,6 +328,11 @@ struct HistoryView: View {
                         refreshData() // Refresh after sync completes
                     }
                     .transition(.move(edge: .bottom).combined(with: .opacity))
+                } else if case .failed(let message) = bleManager.syncState {
+                    SyncFailedBanner(message: message) {
+                        bleManager.syncState = .idle
+                    }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
             .animation(.easeInOut(duration: 0.3), value: bleManager.syncState)
@@ -1062,6 +1067,53 @@ struct SyncCompletedBanner: View {
         .onAppear {
             // Auto-dismiss after 3 seconds
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                onDismiss()
+            }
+        }
+    }
+}
+
+// MARK: - Sync Failed Banner
+struct SyncFailedBanner: View {
+    let message: String
+    let onDismiss: () -> Void
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.title2)
+                .foregroundColor(.white)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Sync Failed")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.white)
+                
+                Text(message)
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.8))
+            }
+            
+            Spacer()
+            
+            Button(action: onDismiss) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title3)
+                    .foregroundColor(.white.opacity(0.7))
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.red)
+                .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 4)
+        )
+        .padding(.horizontal)
+        .padding(.bottom, 8)
+        .onAppear {
+            // Auto-dismiss after 5 seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
                 onDismiss()
             }
         }

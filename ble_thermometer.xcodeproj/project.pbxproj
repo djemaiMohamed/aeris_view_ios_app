@@ -6,10 +6,6 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXBuildFile section */
-		5DB881DA2D9B4500009059A3 /* Yams in Frameworks */ = {isa = PBXBuildFile; productRef = 5DB881D92D9B4500009059A3 /* Yams */; };
-/* End PBXBuildFile section */
-
 /* Begin PBXContainerItemProxy section */
 		5DCB3D2A2D9A05BA00B5F6D2 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -56,7 +52,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				5DB881DA2D9B4500009059A3 /* Yams in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -117,7 +112,6 @@
 			);
 			name = ble_thermometer;
 			packageProductDependencies = (
-				5DB881D92D9B4500009059A3 /* Yams */,
 			);
 			productName = ble_thermometer;
 			productReference = 5DCB3D172D9A05B900B5F6D2 /* ble_thermometer.app */;
@@ -202,7 +196,6 @@
 			mainGroup = 5DCB3D0E2D9A05B900B5F6D2;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				5DB881D82D9B4500009059A3 /* XCRemoteSwiftPackageReference "Yams" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 5DCB3D182D9A05B900B5F6D2 /* Products */;
@@ -571,25 +564,6 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		5DB881D82D9B4500009059A3 /* XCRemoteSwiftPackageReference "Yams" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/jpsim/Yams.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 5.3.1;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		5DB881D92D9B4500009059A3 /* Yams */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 5DB881D82D9B4500009059A3 /* XCRemoteSwiftPackageReference "Yams" */;
-			productName = Yams;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 5DCB3D0F2D9A05B900B5F6D2 /* Project object */;
 }

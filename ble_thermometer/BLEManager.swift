@@ -61,6 +61,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     private var lastNotificationTime: Date?
     private var co2ValueWasBelowThreshold: Bool = true // Added
     private let notificationCooldownPeriod: TimeInterval = 300 // 5 minutes
+    private var syncNotificationsPendingSetup: Set<CBUUID> = [] // Track which characteristics need notifications after sync setup
+    private var syncDataNotificationsEnabled: [CBPeripheral: Bool] = [:] // Track sync data notification state per device
 
     // Replace these UUIDs with your actual service and characteristic UUIDs
     let targetServiceUUID = CBUUID(string: "1809")
@@ -248,6 +250,14 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             
             // Clean up completion handlers for this peripheral
             self.readValueCompletion.removeAll()
+            
+            // Cancel any ongoing sync if device disconnects during sync
+            if self.syncState.isSyncing {
+                self.syncTimeoutTimer?.invalidate()
+                self.syncTimeoutTimer = nil
+                self.syncState = .failed(message: "Device disconnected during sync")
+                print("❌ Sync failed: Device disconnected during sync")
+            }
         }
     }
 
@@ -294,14 +304,39 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         guard let characteristics = service.characteristics else { return }
+        
+        // First, find and enable sync data notifications FIRST
+        // This is critical - the device firmware requires sync notifications to be set up before live data can work
+        var syncDataChar: CBCharacteristic?
         for characteristic in characteristics {
+            if characteristic.uuid == syncDataCharUUID {
+                syncDataChar = characteristic
+                break
+            }
+        }
+        
+        // Enable sync data notifications first if found
+        if let syncDataChar = syncDataChar {
+            peripheral.setNotifyValue(true, for: syncDataChar)
+            print("🔔 Sync data notifications enabled first (required by device firmware)")
+            // Mark that we're waiting for sync setup to complete
+            syncDataNotificationsEnabled[peripheral] = false
+            return
+        }
+        
+        // After sync data notifications are confirmed (in didUpdateNotificationStateFor), enable other characteristics
+        for characteristic in characteristics {
+            // Skip sync data as it's already handled
+            if characteristic.uuid == syncDataCharUUID {
+                continue
+            }
+            
             // Enable notifications for relevant characteristics
             if characteristic.uuid == co2CharUUID ||
                 characteristic.uuid == tempCharUUID ||
                 characteristic.uuid == humCharUUID ||
                 characteristic.uuid == batteryLevelUUID ||
-                characteristic.uuid == calibrationCharUUID ||
-                characteristic.uuid == syncDataCharUUID {
+                characteristic.uuid == calibrationCharUUID {
                 peripheral.setNotifyValue(true, for: characteristic)
             }
 
@@ -440,13 +475,51 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
-            print("Error updating notification state: \(error.localizedDescription)")
+            print("❌ Error updating notification state for \(characteristic.uuid): \(error.localizedDescription)")
+            return
+        }
+        
+        if characteristic.uuid == syncDataCharUUID {
+            if characteristic.isNotifying {
+                print("✅ Sync data notifications successfully enabled")
+                syncDataNotificationsEnabled[peripheral] = true
+                
+                // Now enable live data notifications after sync data is confirmed
+                enableLiveDataNotifications(for: peripheral)
+            } else {
+                print("⚠️ Sync data notifications disabled")
+                syncDataNotificationsEnabled[peripheral] = false
+            }
         } else {
-            print("Notification state updated for \(characteristic.uuid)")
-            UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: "bondedDeviceUUID")
-            isBonded = true
-            bondedPeripheral = peripheral
-            print("🔗 Bonded to device: \(peripheral.name ?? "Unknown")")
+            print("✅ Notification state updated for \(characteristic.uuid)")
+        }
+        
+        // Update bonding status
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: "bondedDeviceUUID")
+        isBonded = true
+        bondedPeripheral = peripheral
+        print("🔗 Bonded to device: \(peripheral.name ?? "Unknown")")
+    }
+    
+    /// Enable live data notifications after sync data notifications are established
+    private func enableLiveDataNotifications(for peripheral: CBPeripheral) {
+        guard let services = peripheral.services else {
+            print("⚠️ Services not discovered yet for live data notifications")
+            return
+        }
+        
+        for service in services {
+            guard let characteristics = service.characteristics else { continue }
+            for characteristic in characteristics {
+                if characteristic.uuid == co2CharUUID ||
+                    characteristic.uuid == tempCharUUID ||
+                    characteristic.uuid == humCharUUID ||
+                    characteristic.uuid == batteryLevelUUID ||
+                    characteristic.uuid == calibrationCharUUID {
+                    peripheral.setNotifyValue(true, for: characteristic)
+                    print("🔔 Enabled notifications for \(getCharacteristicName(uuid: characteristic.uuid))")
+                }
+            }
         }
     }
 
@@ -880,7 +953,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             // Cancel timeout timer and complete sync immediately
             syncTimeoutTimer?.invalidate()
             syncTimeoutTimer = nil
-            completeSyncOperation()
+            completeSyncOperation(receivedEndMarker: true)
             return
         }
         
@@ -1042,7 +1115,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     }
     
     /// Complete the sync operation and update UI
-    private func completeSyncOperation() {
+    /// - Parameter receivedEndMarker: True if the device explicitly sent a sync end marker (flags=0x02)
+    private func completeSyncOperation(receivedEndMarker: Bool = false) {
         // Prevent duplicate completion
         guard syncState.isSyncing else { return }
         
@@ -1056,19 +1130,31 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             }
         }
         
-        // Update last sync timestamp to current time when sync completes
-        // This ensures next sync will only request data from this point forward
-        saveLastSyncTimestamp(Date())
-        
         let totalReceived = syncReceivedCount
+        
+        // Only update last sync timestamp if:
+        // 1. We received actual data samples, OR
+        // 2. The device explicitly sent a sync end marker (meaning it confirmed no data to send)
+        // This prevents marking sync as complete when disconnection interrupted the sync
+        if totalReceived > 0 || receivedEndMarker {
+            saveLastSyncTimestamp(Date())
+            print("📅 Updated lastSyncTimestamp after successful sync")
+        } else {
+            print("⚠️ Sync timeout with no data - NOT updating lastSyncTimestamp (possible connection issue)")
+        }
+        
         DispatchQueue.main.async {
             if totalReceived > 0 {
                 self.syncState = .completed(totalReceived: totalReceived)
                 print("✅ Sync completed: \(totalReceived) samples received")
-            } else {
-                // No samples received - either up to date or no historical data
+            } else if receivedEndMarker {
+                // Device confirmed it has no historical data to send
                 self.syncState = .completed(totalReceived: 0)
-                print("✅ Sync completed: Device is up to date (no historical data)")
+                print("✅ Sync completed: Device confirmed up to date (no historical data)")
+            } else {
+                // Timeout with no data and no end marker - likely connection issue
+                self.syncState = .failed(message: "No response from device")
+                print("⚠️ Sync timeout: No data received - possible connection issue")
             }
         }
     }
