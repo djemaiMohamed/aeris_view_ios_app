@@ -188,7 +188,7 @@ class HistoryDataManager: ObservableObject {
 
 struct HistoryView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query private var userSettings: [UserSettings]
+    @State private var userSettings: [UserSettings] = []
     @ObservedObject var bleManager: BLEManager
     @StateObject private var dataManager = HistoryDataManager()
     
@@ -197,6 +197,13 @@ struct HistoryView: View {
     
     private var currentSettings: UserSettings {
         userSettings.first ?? UserSettings()
+    }
+
+    private func loadUserSettings() {
+        let descriptor = FetchDescriptor<UserSettings>()
+        if let results = try? modelContext.fetch(descriptor) {
+            userSettings = results
+        }
     }
     
     private func refreshData() {
@@ -304,9 +311,22 @@ struct HistoryView: View {
                     }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: {
-                        bleManager.requestSyncData()
-                    }) {
+                    Menu {
+                        Button(action: {
+                            bleManager.requestSyncData()
+                        }) {
+                            Label("Sync Recent Data", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        
+                        Divider()
+                        
+                        Button(action: {
+                            bleManager.resetLastSyncTimestamp()
+                            bleManager.requestSyncData()
+                        }) {
+                            Label("Request All Data", systemImage: "arrow.down.doc")
+                        }
+                    } label: {
                         if bleManager.syncState.isSyncing {
                             ProgressView()
                                 .progressViewStyle(CircularProgressViewStyle())
@@ -337,6 +357,7 @@ struct HistoryView: View {
             }
             .animation(.easeInOut(duration: 0.3), value: bleManager.syncState)
             .onAppear {
+                loadUserSettings()
                 refreshData()
             }
             .onChange(of: bleManager.activePeripheral?.identifier) { _, _ in

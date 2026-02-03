@@ -5,19 +5,32 @@ import UserNotifications
 struct SettingsView: View {
     @ObservedObject var bleManager: BLEManager
     @Environment(\.modelContext) private var modelContext
-    @Query private var userSettings: [UserSettings]
+    @State private var userSettings: [UserSettings] = []
     @State private var showingMeasurementIntervalPicker = false
     @State private var showingTemperatureUnitPicker = false
     @State private var showingCO2ThresholdSlider = false
     @FocusState private var ppmFieldFocused: Bool
+    @State private var didEnsureSettings = false
     
     private var currentSettings: UserSettings {
-        if let settings = userSettings.first {
-            return settings
-        } else {
+        userSettings.first ?? UserSettings()
+    }
+
+    private func loadUserSettings() {
+        let descriptor = FetchDescriptor<UserSettings>()
+        if let results = try? modelContext.fetch(descriptor) {
+            userSettings = results
+        }
+    }
+
+    private func ensureSettings() {
+        guard !didEnsureSettings else { return }
+        didEnsureSettings = true
+        if userSettings.isEmpty {
             let newSettings = UserSettings()
             modelContext.insert(newSettings)
-            return newSettings
+            try? modelContext.save()
+            userSettings = [newSettings]
         }
     }
     
@@ -61,6 +74,10 @@ struct SettingsView: View {
                         Button("Done") { ppmFieldFocused = false }
                     }
                 }
+            }
+            .task {
+                loadUserSettings()
+                ensureSettings()
             }
         }
     }
@@ -588,9 +605,16 @@ struct ThresholdRow: View {
 
 struct DataExportView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query private var readings: [SensorReading]
+    @State private var readings: [SensorReading] = []
     @State private var showingShareSheet = false
     @State private var exportURL: URL?
+
+    private func loadReadings() {
+        let descriptor = FetchDescriptor<SensorReading>()
+        if let results = try? modelContext.fetch(descriptor) {
+            readings = results
+        }
+    }
     
     var body: some View {
         VStack(spacing: 20) {
@@ -643,6 +667,7 @@ struct DataExportView: View {
                 ShareSheet(urls: [url])
             }
         }
+        .task { loadReadings() }
     }
     
     private func exportData() {

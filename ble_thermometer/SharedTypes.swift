@@ -68,25 +68,29 @@ struct TemperatureReading {
     }
 }
 
-/// Represents a sensor sample received from the device (both live and historical)
+enum SyncFrameType: UInt8 {
+    case live = 0x00
+    case syncData = 0x01
+    case syncStart = 0x02
+    case syncDone = 0x03
+    case syncAbort = 0x04
+}
+
+/// Represents a sensor sample received from the device (live or sync data frames)
 struct SensorSample {
-    let timestamp: Date       // Computed absolute timestamp (epoch_actual + uptime_sec)
-    let co2: Int16
-    let temperatureC: Int16   // Celsius (raw value, divide by 100 for actual)
-    let humidity: Int16       // Raw value - whole percentage (e.g., 20 = 20%)
-    let flags: UInt8          // 0 = live, 1 = historical, 2 = sync end marker
-    let battery: UInt8        // Battery percentage (only valid for live data, flags=0)
-    
-    var isHistorical: Bool {
-        return flags == 1
-    }
+    let timestamp: Date
+    let co2: Int
+    let temperatureCentiDegrees: Int   // Celsius raw value, divide by 100 for display
+    let humidity: Int                  // Whole percentage
+    let battery: Int                   // Battery percentage (for live and sync data frames)
+    let frameType: SyncFrameType
     
     var isLive: Bool {
-        return flags == 0
+        return frameType == .live
     }
     
-    var isSyncEndMarker: Bool {
-        return flags == 2
+    var isSyncData: Bool {
+        return frameType == .syncData
     }
     
     /// Convert to SensorReading for database storage
@@ -94,8 +98,8 @@ struct SensorSample {
         return SensorReading(
             timestamp: timestamp,
             co2Value: Double(co2),
-            temperature: Double(temperatureC) / 100.0,
-            humidity: Double(humidity),  // Already whole percentage
+            temperature: Double(temperatureCentiDegrees) / 100.0,
+            humidity: Double(humidity),
             isCelsius: true,
             deviceId: deviceId,
             deviceName: deviceName

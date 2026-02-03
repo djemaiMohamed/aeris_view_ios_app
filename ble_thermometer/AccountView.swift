@@ -4,18 +4,31 @@ import UIKit
 
 struct AccountView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query private var userSettings: [UserSettings]
+    @State private var userSettings: [UserSettings] = []
     @State private var isEditing = false
     @State private var tempUserName = ""
     @State private var tempUserEmail = ""
+    @State private var didEnsureSettings = false
     
     private var currentSettings: UserSettings {
-        if let settings = userSettings.first {
-            return settings
-        } else {
+        userSettings.first ?? UserSettings()
+    }
+
+    private func loadUserSettings() {
+        let descriptor = FetchDescriptor<UserSettings>()
+        if let results = try? modelContext.fetch(descriptor) {
+            userSettings = results
+        }
+    }
+
+    private func ensureSettings() {
+        guard !didEnsureSettings else { return }
+        didEnsureSettings = true
+        if userSettings.isEmpty {
             let newSettings = UserSettings()
             modelContext.insert(newSettings)
-            return newSettings
+            try? modelContext.save()
+            userSettings = [newSettings]
         }
     }
     
@@ -145,6 +158,10 @@ struct AccountView: View {
                     }
                 }
             }
+            .task {
+                loadUserSettings()
+                ensureSettings()
+            }
         }
     }
     
@@ -217,7 +234,15 @@ struct AccountSettingRow: View {
 }
 
 struct UsageStatsView: View {
-    @Query private var readings: [SensorReading]
+    @Environment(\.modelContext) private var modelContext
+    @State private var readings: [SensorReading] = []
+
+    private func loadReadings() {
+        let descriptor = FetchDescriptor<SensorReading>()
+        if let results = try? modelContext.fetch(descriptor) {
+            readings = results
+        }
+    }
     
     private var stats: (totalReadings: Int, daysActive: Int, avgCO2: Double) {
         let total = readings.count
@@ -252,6 +277,7 @@ struct UsageStatsView: View {
                 color: getAirQualityLevel(co2: stats.avgCO2).color
             )
         }
+        .task { loadReadings() }
     }
 }
 

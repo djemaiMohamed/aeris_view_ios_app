@@ -3,6 +3,7 @@ import SwiftData
 import UserNotifications
 import SwiftUI
 import Foundation
+import UIKit
 
 class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     // Per-device state for multi-device support
@@ -12,6 +13,22 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         var hum: Double = 0
         var isCelsius: Bool = true
         var battery: Int = 0
+    }
+
+    private enum SyncCompletionReason {
+        case done(samplesSent: Int)
+        case abort(samplesSent: Int, reason: String)
+        case timeout
+    }
+    
+    private struct SyncSessionContext {
+        let totalSamples: Int
+        let oldestIndex: Int
+        let protocolVersion: UInt8
+        let effectiveStartIndex: Int
+        let deviceUptimeAtSyncStart: UInt32  // Device uptime from SYNC_START frame
+        let phoneTimeAtSyncStart: TimeInterval  // Phone time when sync started (for timestamp calculation)
+        var samplesReceived: Int = 0
     }
 
     // MARK: - Published Properties
@@ -44,7 +61,16 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     private var syncTimeoutTimer: Timer?
     private var syncReceivedCount: Int = 0
     private var lastSyncNotificationTime: Date?
-    private let syncTimeoutInterval: TimeInterval = 2.0  // Complete sync when no notification for 2 seconds
+    private let minimumSyncTimeout: TimeInterval = 180.0   // Minimum timeout for sync (seconds)
+    private let maximumSyncTimeout: TimeInterval = 900.0   // Cap sync timeout (seconds)
+    private let perSampleTimeoutAllowance: TimeInterval = 0.75 // Allowance per sample (seconds)
+    private var currentSyncTimeoutInterval: TimeInterval?
+    private var syncSessionContext: SyncSessionContext?
+    private let ringIndexModulo: Int = 3000 // Device buffer size: max 3000 samples, then wraps to 0
+    private var latestSyncedSampleDate: Date?
+    private var lastSyncStartIndex: Int = 0  // Persisted requested start index for next sync
+    private var requestedSyncStartIndex: Int = 0  // Start index used for the in-flight sync
+    private var currentDeviceUptimeSec: UInt32 = 0  // Current device uptime for timestamp calculation (simplified protocol)
     
     // Store last known values per device so we can swap views instantly
     private var deviceSnapshots: [UUID: DeviceSnapshot] = [:]
@@ -78,10 +104,19 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
     override init() {
         super.init()
-        centralManager = CBCentralManager(delegate: self, queue: nil)
+        centralManager = CBCentralManager(
+            delegate: self,
+            queue: nil,
+            options: [
+                CBCentralManagerOptionShowPowerAlertKey: true,
+                CBCentralManagerOptionRestoreIdentifierKey: "AirQualityCentralRestore"
+            ]
+        )
         loadCharacteristicNames()
         requestNotificationPermission()
         loadLastSyncTimestamp()
+        loadLastSyncStartIndex()
+        registerLifecycleNotifications()
     }
     
     func setModelContext(_ context: ModelContext) {
@@ -90,6 +125,23 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     
     func setUserSettings(_ settings: UserSettings) {
         self.userSettings = settings
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    private func registerLifecycleNotifications() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleWillEnterForeground),
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+    }
+
+    @objc private func handleWillEnterForeground() {
+        attemptReconnectIfNeeded()
     }
     
     private func requestNotificationPermission() {
@@ -159,6 +211,14 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         centralManager.connect(peripheral, options: [CBConnectPeripheralOptionNotifyOnConnectionKey: true])
     }
 
+    /// Attempt reconnection when app returns to foreground or if connection dropped
+    func attemptReconnectIfNeeded() {
+        if let connected = connectedPeripheral, connected.state == .connected {
+            return
+        }
+        reconnectToBondedDevice(with: centralManager)
+    }
+
     func disconnect(peripheral: CBPeripheral) {
         centralManager.cancelPeripheralConnection(peripheral)
     }
@@ -195,6 +255,19 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         } else {
             isBluetoothEnabled = false
             print("Bluetooth is not powered on")
+        }
+    }
+
+    func centralManager(_ central: CBCentralManager, willRestoreState dict: [String : Any]) {
+        if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] {
+            for peripheral in peripherals {
+                peripheral.delegate = self
+                if !connectedPeripherals.contains(where: { $0.identifier == peripheral.identifier }) {
+                    connectedPeripherals.append(peripheral)
+                }
+            }
+            connectedPeripheral = peripherals.first
+            activePeripheral = connectedPeripheral ?? activePeripheral
         }
     }
 
@@ -255,9 +328,14 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             if self.syncState.isSyncing {
                 self.syncTimeoutTimer?.invalidate()
                 self.syncTimeoutTimer = nil
+                self.syncSessionContext = nil
+                self.latestSyncedSampleDate = nil
                 self.syncState = .failed(message: "Device disconnected during sync")
                 print("❌ Sync failed: Device disconnected during sync")
             }
+
+            // Attempt to reconnect if bonded
+            self.attemptReconnectIfNeeded()
         }
     }
 
@@ -317,8 +395,11 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         
         // Enable sync data notifications first if found
         if let syncDataChar = syncDataChar {
-            peripheral.setNotifyValue(true, for: syncDataChar)
-            print("🔔 Sync data notifications enabled first (required by device firmware)")
+            if !syncDataChar.properties.contains(.indicate) {
+                print("⚠️ sync_data_id characteristic does not expose indicate; indications are required by firmware")
+            }
+            peripheral.setNotifyValue(true, for: syncDataChar) // iOS handles notify vs indicate per properties
+            print("🔔 Sync data indications enabled first (required by device firmware)")
             // Mark that we're waiting for sync setup to complete
             syncDataNotificationsEnabled[peripheral] = false
             return
@@ -473,6 +554,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         }
     }
 
+
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
             print("❌ Error updating notification state for \(characteristic.uuid): \(error.localizedDescription)")
@@ -520,6 +602,15 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                     print("🔔 Enabled notifications for \(getCharacteristicName(uuid: characteristic.uuid))")
                 }
             }
+        }
+    }
+
+    /// Ensure sync data channel is fully configured (notifications + CCCD) before proceeding
+    private func attemptSyncReady(for peripheral: CBPeripheral) {
+        // No-op placeholder retained for potential future gating; iOS manages CCCD via setNotifyValue
+        let notifyReady = syncDataNotificationsEnabled[peripheral] == true
+        if notifyReady {
+            enableLiveDataNotifications(for: peripheral)
         }
     }
 
@@ -856,10 +947,27 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         UserDefaults.standard.set(timestamp, forKey: "lastSyncTimestamp")
         print("📅 Saved last sync timestamp: \(timestamp)")
     }
+
+    /// Load last requested sync start index from UserDefaults
+    private func loadLastSyncStartIndex() {
+        let stored = UserDefaults.standard.integer(forKey: "lastSyncStartIndex")
+        // Bound to valid range [0, ringIndexModulo)
+        lastSyncStartIndex = max(0, stored) % ringIndexModulo
+        print("📂 Loaded last sync start index: \(lastSyncStartIndex) (bounded to 0-\(ringIndexModulo-1))")
+    }
+    
+    /// Persist next requested sync start index to UserDefaults
+    private func saveLastSyncStartIndex(_ index: Int) {
+        // Bound to valid range [0, ringIndexModulo)
+        lastSyncStartIndex = max(0, index) % ringIndexModulo
+        UserDefaults.standard.set(lastSyncStartIndex, forKey: "lastSyncStartIndex")
+        print("💾 Saved next sync start index: \(lastSyncStartIndex) (bounded to 0-\(ringIndexModulo-1))")
+    }
     
     /// Request historical/missed data from the device
     /// - Parameter lastSync: Optional last sync timestamp. If nil, uses stored value or requests all data
     func requestSyncData(lastSync: Date? = nil) {
+        _ = lastSync // kept for compatibility; start index drives sync
         let target = activePeripheral ?? connectedPeripheral
         guard let peripheral = target, peripheral.state == .connected else {
             print("❌ No connected peripheral to request sync data")
@@ -868,6 +976,19 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             }
             return
         }
+
+        guard syncDataNotificationsEnabled[peripheral] == true else {
+            print("❌ Sync data indications are not enabled; cannot start sync")
+            DispatchQueue.main.async {
+                self.syncState = .failed(message: "Enable sync indications before syncing")
+            }
+            return
+        }
+        print("✅ Sync data channel marked notifying; proceeding to send sync request")
+        
+        syncSessionContext = nil
+        latestSyncedSampleDate = nil
+        syncTimeoutTimer?.invalidate()
         
         // Find the sync data characteristic
         guard let services = peripheral.services else {
@@ -881,8 +1002,9 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         for service in services {
             guard let characteristics = service.characteristics else { continue }
             for characteristic in characteristics where characteristic.uuid == syncDataCharUUID {
-                // Prepare sync data (8 bytes)
-                let syncData = encodeSyncDataRequest(lastSync: lastSync)
+                // Prepare sync data (4 bytes) with persisted start index (simplified protocol)
+                requestedSyncStartIndex = lastSyncStartIndex % ringIndexModulo
+                let syncData = encodeSyncDataRequest(startIndex: requestedSyncStartIndex)
                 
                 // Reset sync state
                 DispatchQueue.main.async {
@@ -893,10 +1015,10 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                 
                 // Write the sync request
                 writeValue(for: characteristic, of: peripheral, value: syncData)
-                print("📤 Sync data request sent")
+                print("📤 Sync data request sent (startIdx=\(requestedSyncStartIndex), simplified protocol)")
                 
                 // Start timeout timer
-                startSyncTimeoutTimer()
+                startSyncTimeoutTimer(totalSamples: nil)
                 return
             }
         }
@@ -907,143 +1029,223 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         }
     }
     
-    /// Encode sync data request as 8 bytes (all little-endian to match device format)
-    /// - MSB (bytes 0-3): Current device absolute timestamp (Unix epoch)
-    /// - LSB (bytes 4-7): Last sync timestamp (Unix epoch)
-    private func encodeSyncDataRequest(lastSync: Date? = nil) -> Data {
-        var data = Data(count: 8)
+    /// Encode sync data request as 4 bytes (simplified protocol)
+    /// - Bytes 0-3: requested start index for device ring buffer (little-endian UInt32)
+    /// Phone now handles timestamp calculation - device sends only uptime
+    private func encodeSyncDataRequest(startIndex: Int) -> Data {
+        var data = Data(count: 4)
         
-        // Current timestamp (little-endian)
-        let currentTimestamp = UInt32(Date().timeIntervalSince1970)
-        data[0] = UInt8(currentTimestamp & 0xFF)
-        data[1] = UInt8((currentTimestamp >> 8) & 0xFF)
-        data[2] = UInt8((currentTimestamp >> 16) & 0xFF)
-        data[3] = UInt8((currentTimestamp >> 24) & 0xFF)
+        // Requested start index (little-endian UInt32)
+        let boundedIndex = UInt32(max(0, startIndex) % ringIndexModulo)
+        data[0] = UInt8(boundedIndex & 0xFF)
+        data[1] = UInt8((boundedIndex >> 8) & 0xFF)
+        data[2] = UInt8((boundedIndex >> 16) & 0xFF)
+        data[3] = UInt8((boundedIndex >> 24) & 0xFF)
         
-        // Last sync timestamp (little-endian, or 0 if never synced)
-        let syncTimestamp = lastSync ?? lastSyncTimestamp ?? Date(timeIntervalSince1970: 0)
-        let lastSyncEpoch = UInt32(syncTimestamp.timeIntervalSince1970)
-        data[4] = UInt8(lastSyncEpoch & 0xFF)
-        data[5] = UInt8((lastSyncEpoch >> 8) & 0xFF)
-        data[6] = UInt8((lastSyncEpoch >> 16) & 0xFF)
-        data[7] = UInt8((lastSyncEpoch >> 24) & 0xFF)
-        
-        print("📤 Sync request - Current: \(currentTimestamp), LastSync: \(lastSyncEpoch)")
+        print("📤 Sync request (simplified) - StartIdx: \(boundedIndex)")
         
         return data
     }
     
-    /// Handle sync data notifications from the device
+    /// Handle sync data notifications from the device (indication-driven framed protocol)
     private func handleSyncDataNotification(data: Data, peripheral: CBPeripheral) {
-        // Debug: print raw data (only during sync or for debugging)
-        if syncState.isSyncing {
-            let hexString = data.map { String(format: "%02X", $0) }.joined(separator: " ")
-            print("📥 Sync notification raw data (\(data.count) bytes): \(hexString)")
-        }
-        
-        // Parse the sensor sample from the notification data
-        guard let sample = decodeSensorSample(from: data) else {
-            print("⚠️ Failed to decode sensor sample from sync notification")
+        guard data.count == 12 else {
+            print("⚠️ Unexpected sync frame length: \(data.count) bytes (expected 12)")
             return
         }
         
-        // Check for sync end marker (flags = 0x02)
-        if sample.isSyncEndMarker {
-            print("✅ Sync end marker received")
-            // Cancel timeout timer and complete sync immediately
-            syncTimeoutTimer?.invalidate()
-            syncTimeoutTimer = nil
-            completeSyncOperation(receivedEndMarker: true)
+        guard let frameType = SyncFrameType(rawValue: data[10]) else {
+            print("⚠️ Unknown frame type: \(data[10])")
             return
         }
         
-        // Process the sample based on type
-        if sample.isHistorical {
-            // Historical data - only expected during sync
-            lastSyncNotificationTime = Date()
-            syncReceivedCount += 1
+        switch frameType {
+        case .syncStart:
+            guard let startFrame = decodeSyncStartFrame(from: data) else { return }
+            if startFrame.protocolVersion != 0x01 {
+                syncTimeoutTimer?.invalidate()
+                syncTimeoutTimer = nil
+                syncSessionContext = nil
+                DispatchQueue.main.async {
+                    self.syncState = .failed(message: "Unsupported sync protocol v\(startFrame.protocolVersion)")
+                }
+                print("⚠️ Unsupported sync protocol version \(startFrame.protocolVersion)")
+                return
+            }
+            let effectiveStartIndex = resolveEffectiveStartIndex(
+                requested: requestedSyncStartIndex,
+                oldest: startFrame.oldestIndex,
+                totalSamples: startFrame.totalSamples,
+                lastSentValid: startFrame.lastSentValid
+            )
+            let phoneTimeNow = Date().timeIntervalSince1970
             
-            // Update sync state with progress
-            DispatchQueue.main.async {
-                self.syncState = .syncing(progress: 0, receivedCount: self.syncReceivedCount)
+            // Log device's buffer status
+            if startFrame.lastSentValid {
+                print("✅ Device indicates last sync point is valid (can resume)")
+            } else {
+                print("⚠️ Device indicates buffer wrapped; must restart from oldest")
             }
             
-            // Restart timeout timer
-            startSyncTimeoutTimer()
+            // Log buffer state for debugging
+            logCircularBufferState(
+                oldest: startFrame.oldestIndex,
+                totalSamples: startFrame.totalSamples,
+                requested: requestedSyncStartIndex,
+                effective: effectiveStartIndex
+            )
             
-            print("📥 Historical sample #\(syncReceivedCount): CO2=\(sample.co2), Temp=\(Double(sample.temperatureC)/100.0)°C, Hum=\(sample.humidity)%, Time=\(sample.timestamp)")
+            syncSessionContext = SyncSessionContext(
+                totalSamples: startFrame.totalSamples,
+                oldestIndex: startFrame.oldestIndex,
+                protocolVersion: startFrame.protocolVersion,
+                effectiveStartIndex: effectiveStartIndex,
+                deviceUptimeAtSyncStart: startFrame.deviceUptime,
+                phoneTimeAtSyncStart: phoneTimeNow,
+                samplesReceived: 0
+            )
+            syncReceivedCount = 0
+            latestSyncedSampleDate = nil
+            lastSyncNotificationTime = Date()
+            DispatchQueue.main.async {
+                self.syncState = .syncing(progress: 0, receivedCount: 0)
+            }
+            startSyncTimeoutTimer(totalSamples: startFrame.totalSamples)
+            print("🚦 Sync start: total=\(startFrame.totalSamples), oldestIndex=\(startFrame.oldestIndex), proto=\(startFrame.protocolVersion), effectiveStart=\(effectiveStartIndex)")
+            print("⏱️ Timestamp reference: phoneTime=\(Int(phoneTimeNow)), bootEpoch=\(Int(phoneTimeNow - TimeInterval(startFrame.deviceUptime)))")
+        case .syncData:
+            guard let session = syncSessionContext else {
+                print("⚠️ Received sync data frame without an active session")
+                return
+            }
+            guard let sample = decodeMeasurementFrame(from: data, frameType: frameType) else { return }
+            print("⬇️ Sync data frame ts=\(Int(sample.timestamp.timeIntervalSince1970)) co2=\(sample.co2) tCenti=\(sample.temperatureCentiDegrees) hum=\(sample.humidity) batt=\(sample.battery)")
             
-            // Save historical sample to database
-            saveHistoricalSample(sample, peripheral: peripheral)
-            
-            // Note: lastSyncTimestamp is updated when sync completes, not per-sample
-        } else if sample.isLive {
-            // Live data - regular sensor updates
-            print("📡 Live: CO2=\(sample.co2), Temp=\(Double(sample.temperatureC)/100.0)°C, Hum=\(sample.humidity)%, Bat=\(sample.battery)%")
-            
-            // Update live values (includes battery)
+            // Append only if newer than last sync timestamp
+            if let lastSync = lastSyncTimestamp, sample.timestamp <= lastSync {
+                print("⏭️ Skipping stale sample at \(sample.timestamp) (<= lastSyncTimestamp)")
+            } else {
+                // Check if we've reached the device buffer limit
+                if syncReceivedCount >= ringIndexModulo {
+                    print("⚠️ Reached maximum sync limit of \(ringIndexModulo) samples; stopping sync")
+                    completeSyncOperation(reason: .done(samplesSent: syncReceivedCount))
+                    return
+                }
+                syncReceivedCount += 1
+                var updatedSession = session
+                updatedSession.samplesReceived += 1
+                syncSessionContext = updatedSession
+                latestSyncedSampleDate = max(latestSyncedSampleDate ?? sample.timestamp, sample.timestamp)
+                publishSyncProgress()
+                saveHistoricalSample(sample, peripheral: peripheral)
+            }
+            lastSyncNotificationTime = Date()
+            // Keep next start index in sync with data received so far
+            let rollingNextIndex = computeNextSyncStartIndex(samplesProcessed: syncReceivedCount)
+            saveLastSyncStartIndex(rollingNextIndex)
+            startSyncTimeoutTimer(totalSamples: syncSessionContext?.totalSamples)
+        case .syncDone:
+            let samplesSent = decodeSyncDoneFrame(from: data)
+            print("🏁 Sync done frame received; samplesSent=\(samplesSent)")
+            completeSyncOperation(reason: .done(samplesSent: samplesSent))
+        case .syncAbort:
+            let abort = decodeSyncAbortFrame(from: data)
+            print("🛑 Sync abort frame received; samplesSent=\(abort.samplesSent) reason=\(abort.reason)")
+            completeSyncOperation(reason: .abort(samplesSent: abort.samplesSent, reason: abort.reason))
+        case .live:
+            guard let sample = decodeMeasurementFrame(from: data, frameType: frameType) else { return }
             updateLiveValues(from: sample, peripheral: peripheral)
-            
-            // Save to database periodically
             saveSensorReading(peripheral: peripheral)
         }
     }
-    
-    /// Decode a sensor sample from notification data
-    /// Expected format from device (12 bytes, all little-endian):
-    /// - [0-3]: timestamp (uint32, Unix epoch)
-    /// - [4-5]: CO2 (uint16)
-    /// - [6-7]: temperature (int16, centi-degrees Celsius)
-    /// - [8-9]: humidity (uint16, whole percent)
-    /// - [10]: flags (0x00 = live, 0x01 = historical, 0x02 = sync complete)
-    /// - [11]: battery percentage (only valid for live data when flags=0)
-    private func decodeSensorSample(from data: Data) -> SensorSample? {
-        guard data.count >= 11 else {
-            print("⚠️ Sync data too short: \(data.count) bytes (expected 11+)")
+
+    private func decodeSyncStartFrame(from data: Data) -> (totalSamples: Int, oldestIndex: Int, protocolVersion: UInt8, deviceUptime: UInt32, lastSentValid: Bool)? {
+        guard data.count == 12 else { return nil }
+        // Parse SYNC_START frame (updated format includes device uptime and last_sent_valid flag):
+        // Bytes 0-3: device_uptime (UInt32, little-endian)
+        // Bytes 4-5: total_samples (UInt16, little-endian)
+        // Bytes 6-7: oldest_idx (UInt16, little-endian)
+        // Byte 8: last_sent_valid flag (1 = can resume from last sync, 0 = buffer wrapped, restart)
+        // Bytes 9: padding
+        // Byte 10: FRAME_SYNC_START
+        // Byte 11: padding
+        let deviceUptime = UInt32(data[0]) | (UInt32(data[1]) << 8) |
+                          (UInt32(data[2]) << 16) | (UInt32(data[3]) << 24)
+        let totalSamples = Int(UInt16(data[4]) | (UInt16(data[5]) << 8))
+        let oldestIndex = Int(UInt16(data[6]) | (UInt16(data[7]) << 8))
+        let lastSentValid = data[8] != 0
+        let protocolVersion = UInt8(0x01)  // Simplified protocol version
+        return (totalSamples, oldestIndex, protocolVersion, deviceUptime, lastSentValid)
+    }
+
+    private func decodeSyncDoneFrame(from data: Data) -> Int {
+        guard data.count >= 2 else { return syncReceivedCount }
+        let samplesSent = Int(UInt16(data[0]) | (UInt16(data[1]) << 8))
+        return samplesSent
+    }
+
+    private func decodeSyncAbortFrame(from data: Data) -> (samplesSent: Int, reason: String) {
+        guard data.count >= 7 else {
+            return (syncReceivedCount, "Unknown")
+        }
+        let samplesSent = Int(UInt16(data[0]) | (UInt16(data[1]) << 8))
+        let reasonCode = data[6]
+        let reason: String
+        switch reasonCode {
+        case 1:
+            reason = "Generic abort"
+        default:
+            reason = "Abort code \(reasonCode)"
+        }
+        return (samplesSent, reason)
+    }
+
+    /// Decode live or sync data measurement frames (12 bytes, little-endian)
+    /// Simplified protocol: Bytes 0-3 contain device uptime (not absolute timestamp)
+    /// Phone calculates absolute timestamp using: timestamp = (phoneTimeAtSyncStart - deviceUptimeAtSyncStart) + sampleUptime
+    private func decodeMeasurementFrame(from data: Data, frameType: SyncFrameType) -> SensorSample? {
+        guard data.count == 12 else {
+            print("⚠️ Measurement frame wrong length: \(data.count)")
             return nil
         }
         
-        // Parse timestamp (4 bytes, little-endian)
-        let timestamp = UInt32(data[0]) |
+        // Bytes 0-3: Device uptime (simplified protocol)
+        let uptimeRaw = UInt32(data[0]) |
                         (UInt32(data[1]) << 8) |
                         (UInt32(data[2]) << 16) |
                         (UInt32(data[3]) << 24)
         
-        // Parse CO2 (2 bytes, little-endian)
-        let co2 = Int16(bitPattern: UInt16(data[4]) | (UInt16(data[5]) << 8))
+        let co2 = Int(UInt16(data[4]) | (UInt16(data[5]) << 8))
+        let temperature = Int(Int16(bitPattern: UInt16(data[6]) | (UInt16(data[7]) << 8)))
+        let humidity = Int(UInt16(data[8]) | (UInt16(data[9]) << 8))
+        let battery = Int(data[11])
         
-        // Parse temperature (2 bytes, little-endian, in centi-degrees Celsius)
-        let tempRaw = Int16(bitPattern: UInt16(data[6]) | (UInt16(data[7]) << 8))
-        
-        // Parse humidity (2 bytes, little-endian, whole percent)
-        let humRaw = Int16(bitPattern: UInt16(data[8]) | (UInt16(data[9]) << 8))
-        
-        // Parse flags (1 byte) - 0x00 = live, 0x01 = historical, 0x02 = sync complete
-        let flags = data[10]
-        
-        // Parse battery (1 byte) - only valid for live data (flags=0)
-        let battery: UInt8 = data.count >= 12 ? data[11] : 0
-        
-        // Debug parsed values
-        if flags == 0 {
-            print("📊 Parsed LIVE: timestamp=\(timestamp), co2=\(co2), temp=\(tempRaw), hum=\(humRaw), battery=\(battery)%")
+        // Calculate absolute timestamp using device uptime
+        // timestamp = (phoneTime - deviceUptime) + sampleUptime
+        let timestamp: TimeInterval
+        if let session = syncSessionContext, frameType == .syncData {
+            // Use sync session context to calculate timestamp
+            let bootEpoch = session.phoneTimeAtSyncStart - TimeInterval(session.deviceUptimeAtSyncStart)
+            timestamp = bootEpoch + TimeInterval(uptimeRaw)
+            print("⏱️ Timestamp calc: bootEpoch=\(Int(bootEpoch)) + uptime=\(uptimeRaw) = \(Int(timestamp))")
         } else {
-            print("📊 Parsed: timestamp=\(timestamp), co2=\(co2), temp=\(tempRaw), hum=\(humRaw), flags=\(flags)")
+            // Fallback: Use current phone time minus assumed device uptime
+            let bootEpoch = Date().timeIntervalSince1970 - TimeInterval(uptimeRaw)
+            timestamp = bootEpoch + TimeInterval(uptimeRaw)
+            print("⏱️ Timestamp calc (no session): uptime=\(uptimeRaw) → timestamp=\(Int(timestamp))")
         }
         
-        // Timestamp is already Unix epoch from device
-        let absoluteTimestamp = Date(timeIntervalSince1970: TimeInterval(timestamp))
-        
+        let sampleDate = Date(timeIntervalSince1970: timestamp)
         return SensorSample(
-            timestamp: absoluteTimestamp,
+            timestamp: sampleDate,
             co2: co2,
-            temperatureC: tempRaw,
-            humidity: humRaw,
-            flags: flags,
-            battery: battery
+            temperatureCentiDegrees: temperature,
+            humidity: humidity,
+            battery: battery,
+            frameType: frameType
         )
     }
-    
+
     /// Save a historical sample to the database
     private func saveHistoricalSample(_ sample: SensorSample, peripheral: CBPeripheral) {
         guard let context = modelContext else { return }
@@ -1071,10 +1273,10 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         var snapshot = deviceSnapshots[peripheral.identifier] ?? DeviceSnapshot()
         
         snapshot.co2 = Double(sample.co2)
-        snapshot.temp = Double(sample.temperatureC) / 100.0
-        snapshot.hum = Double(sample.humidity)  // Already whole percentage
+        snapshot.temp = Double(sample.temperatureCentiDegrees) / 100.0
+        snapshot.hum = Double(sample.humidity)
         snapshot.isCelsius = true
-        snapshot.battery = Int(sample.battery)  // Update battery from live sample
+        snapshot.battery = sample.battery
         
         deviceSnapshots[peripheral.identifier] = snapshot
         
@@ -1091,14 +1293,26 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         }
     }
     
+    /// Compute a timeout interval based on total samples expected
+    private func computeSyncTimeoutInterval(totalSamples: Int?) -> TimeInterval {
+        guard let total = totalSamples, total > 0 else {
+            return maximumSyncTimeout / 2 // Fallback generous timeout when count unknown
+        }
+        let estimated = Double(total) * perSampleTimeoutAllowance
+        return min(max(estimated, minimumSyncTimeout), maximumSyncTimeout)
+    }
+
     /// Start or restart the sync timeout timer
-    private func startSyncTimeoutTimer() {
+    private func startSyncTimeoutTimer(totalSamples: Int?) {
         // Invalidate existing timer
         syncTimeoutTimer?.invalidate()
         
+        let interval = computeSyncTimeoutInterval(totalSamples: totalSamples)
+        currentSyncTimeoutInterval = interval
+
         // Create new timer on main thread
         DispatchQueue.main.async {
-            self.syncTimeoutTimer = Timer.scheduledTimer(withTimeInterval: self.syncTimeoutInterval, repeats: false) { [weak self] _ in
+            self.syncTimeoutTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
                 self?.handleSyncTimeout()
             }
         }
@@ -1111,16 +1325,16 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         syncTimeoutTimer?.invalidate()
         syncTimeoutTimer = nil
         
-        completeSyncOperation()
+        completeSyncOperation(reason: .timeout)
     }
     
     /// Complete the sync operation and update UI
-    /// - Parameter receivedEndMarker: True if the device explicitly sent a sync end marker (flags=0x02)
-    private func completeSyncOperation(receivedEndMarker: Bool = false) {
-        // Prevent duplicate completion
+    private func completeSyncOperation(reason: SyncCompletionReason) {
         guard syncState.isSyncing else { return }
+
+        syncTimeoutTimer?.invalidate()
+        syncTimeoutTimer = nil
         
-        // Final save of any remaining samples
         if let context = modelContext {
             do {
                 try context.save()
@@ -1130,32 +1344,125 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             }
         }
         
-        let totalReceived = syncReceivedCount
+        let reported = syncSessionContext?.samplesReceived ?? syncReceivedCount
+        let totalReceived: Int
+        var finalState: SyncState
+        var shouldPersistTimestamp = false
         
-        // Only update last sync timestamp if:
-        // 1. We received actual data samples, OR
-        // 2. The device explicitly sent a sync end marker (meaning it confirmed no data to send)
-        // This prevents marking sync as complete when disconnection interrupted the sync
-        if totalReceived > 0 || receivedEndMarker {
-            saveLastSyncTimestamp(Date())
+        // Calculate next index based on effective start and samples received
+        let effectiveStart = syncSessionContext?.effectiveStartIndex ?? requestedSyncStartIndex
+        
+        switch reason {
+        case .done(let samplesSent):
+            totalReceived = max(samplesSent, reported)
+            shouldPersistTimestamp = true
+            finalState = .completed(totalReceived: totalReceived)
+            print("✅ Sync completed: \(totalReceived) samples received")
+            let nextIndex = (effectiveStart + totalReceived) % ringIndexModulo
+            saveLastSyncStartIndex(nextIndex)
+            print("📍 Next sync start index: \(nextIndex) (based on effective start \(effectiveStart) + \(totalReceived) samples)")
+        case .abort(let samplesSent, let reasonText):
+            totalReceived = max(samplesSent, reported)
+            finalState = .failed(message: "Sync aborted: \(reasonText). Partial data kept; please retry.")
+            print("⚠️ Sync aborted after \(totalReceived) samples - reason: \(reasonText)")
+            let nextIndex = (effectiveStart + totalReceived) % ringIndexModulo
+            saveLastSyncStartIndex(nextIndex)
+            print("📍 Next sync start index: \(nextIndex) (based on effective start \(effectiveStart) + \(totalReceived) samples)")
+        case .timeout:
+            totalReceived = reported
+            finalState = .failed(message: "No response from device. Partial data may be saved; please retry.")
+            print("⚠️ Sync timeout: No data received - possible connection issue")
+            let nextIndex = (effectiveStart + totalReceived) % ringIndexModulo
+            saveLastSyncStartIndex(nextIndex)
+            print("📍 Next sync start index: \(nextIndex) (based on effective start \(effectiveStart) + \(totalReceived) samples)")
+        }
+        
+        if shouldPersistTimestamp {
+            let timestampToSave = latestSyncedSampleDate ?? Date()
+            saveLastSyncTimestamp(timestampToSave)
             print("📅 Updated lastSyncTimestamp after successful sync")
-        } else {
-            print("⚠️ Sync timeout with no data - NOT updating lastSyncTimestamp (possible connection issue)")
         }
         
         DispatchQueue.main.async {
-            if totalReceived > 0 {
-                self.syncState = .completed(totalReceived: totalReceived)
-                print("✅ Sync completed: \(totalReceived) samples received")
-            } else if receivedEndMarker {
-                // Device confirmed it has no historical data to send
-                self.syncState = .completed(totalReceived: 0)
-                print("✅ Sync completed: Device confirmed up to date (no historical data)")
-            } else {
-                // Timeout with no data and no end marker - likely connection issue
-                self.syncState = .failed(message: "No response from device")
-                print("⚠️ Sync timeout: No data received - possible connection issue")
-            }
+            self.syncState = finalState
+        }
+        
+        syncSessionContext = nil
+        latestSyncedSampleDate = nil
+        currentSyncTimeoutInterval = nil
+    }
+
+    /// Publish sync progress on the main queue for responsive UI updates
+    private func publishSyncProgress() {
+        let total = syncSessionContext?.totalSamples ?? 0
+        let progress = total > 0 ? min(Double(syncReceivedCount) / Double(total), 1.0) : 0
+        DispatchQueue.main.async {
+            self.syncState = .syncing(progress: progress, receivedCount: self.syncReceivedCount)
+        }
+    }
+
+    /// Calculate the next start index based on the requested index and samples received
+    private func computeNextSyncStartIndex(samplesProcessed: Int) -> Int {
+        let baseIndex = syncSessionContext?.effectiveStartIndex ?? requestedSyncStartIndex
+        guard samplesProcessed > 0 else { return baseIndex % ringIndexModulo }
+        // Ensure result is bounded to valid range [0, ringIndexModulo)
+        let next = (baseIndex + samplesProcessed) % ringIndexModulo
+        return max(0, next)
+    }
+
+    /// Clamp requested start index to the device's valid window
+    /// Circular buffer: valid range is [oldestIndex, oldestIndex + totalSamples) with wraparound
+    /// lastSentValid flag indicates if last sync point is still valid (buffer hasn't wrapped around)
+    private func resolveEffectiveStartIndex(requested: Int, oldest: Int, totalSamples: Int, lastSentValid: Bool) -> Int {
+        guard totalSamples > 0 else { return oldest % ringIndexModulo }
+        
+        // Bound all indices to valid range [0, ringIndexModulo)
+        let boundedRequested = max(0, requested) % ringIndexModulo
+        let boundedOldest = max(0, oldest) % ringIndexModulo
+        
+        // If device indicates last sync point is invalid (buffer wrapped), force restart from oldest
+        if !lastSentValid {
+            print("⚠️ Buffer has wrapped around (last_sent_valid=false); forcing restart from oldest index \(boundedOldest)")
+            return boundedOldest
+        }
+        
+        // Calculate the distance from oldest to requested (in circular buffer terms)
+        // This accounts for wraparound: if oldest=45 and requested=5, distance=10 (wraps around)
+        let distance = (boundedRequested - boundedOldest + ringIndexModulo) % ringIndexModulo
+        
+        // Check if requested index is within valid range [oldestIndex, oldestIndex + totalSamples)
+        let isRequestedInValidRange = distance < totalSamples
+        
+        if isRequestedInValidRange {
+            print("✅ Requested index \(boundedRequested) is valid: distance=\(distance) < totalSamples=\(totalSamples)")
+            return boundedRequested
+        } else {
+            // Requested index is outside valid range, return oldest (start of valid data)
+            print("⚠️ Requested index \(boundedRequested) is outside valid range [oldest=\(boundedOldest), end=\((boundedOldest + totalSamples - 1) % ringIndexModulo)]. Distance=\(distance) >= totalSamples=\(totalSamples). Using oldest index=\(boundedOldest)")
+            return boundedOldest
+        }
+    }
+    
+    /// Log circular buffer state for debugging
+    private func logCircularBufferState(oldest: Int, totalSamples: Int, requested: Int, effective: Int) {
+        let boundedOldest = max(0, oldest) % ringIndexModulo
+        let boundedRequested = max(0, requested) % ringIndexModulo
+        let boundedEffective = max(0, effective) % ringIndexModulo
+        
+        let writeIndex = (boundedOldest + totalSamples) % ringIndexModulo
+        let endIndex = (boundedOldest + totalSamples - 1) % ringIndexModulo
+        let occupancy = Double(totalSamples) / Double(ringIndexModulo) * 100.0
+        
+        print("🔄 Circular Buffer State:")
+        print("   Buffer size: \(ringIndexModulo) indices")
+        print("   Occupancy: \(totalSamples) samples (\(String(format: "%.1f", occupancy))%)")
+        print("   Valid range: [\(boundedOldest)....\(endIndex)] (oldest to newest)")
+        print("   Write position (next): \(writeIndex)")
+        print("   Requested start: \(boundedRequested)")
+        print("   Effective start: \(boundedEffective)")
+        
+        if boundedEffective != boundedRequested {
+            print("   ⚠️ Start index adjusted from \(boundedRequested) to \(boundedEffective)")
         }
     }
     
@@ -1163,6 +1470,9 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     func cancelSync() {
         syncTimeoutTimer?.invalidate()
         syncTimeoutTimer = nil
+        syncSessionContext = nil
+        latestSyncedSampleDate = nil
+        syncReceivedCount = 0
         
         DispatchQueue.main.async {
             self.syncState = .idle
