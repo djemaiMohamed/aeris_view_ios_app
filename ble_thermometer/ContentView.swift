@@ -5,6 +5,7 @@ import CoreBluetooth
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage("demoModeEnabled") private var demoModeEnabled = false
     @StateObject private var bleManager = BLEManager()
     @State private var userSettings: [UserSettings] = []
     @State private var showOnboarding = false
@@ -24,11 +25,7 @@ struct ContentView: View {
     var body: some View {
         Group {
             //bleManager.reconnectToBondedDevice(with: bleManager.centralManager)
-            if !bleManager.isBonded && !bleManager.isBluetoothEnabled {
-                OnboardingView(bleManager: bleManager)
-            } else if !bleManager.isBonded {
-                DevicePairingView(bleManager: bleManager)
-            } else {
+            if demoModeEnabled || bleManager.isBonded {
                 TabView(selection: $selectedTab) {
                     HomeView(bleManager: bleManager)
                         .tabItem {
@@ -59,6 +56,20 @@ struct ContentView: View {
                         .tag(3)
                 }
                 .accentColor(.blue)
+            } else if !bleManager.isBluetoothEnabled {
+                OnboardingView(
+                    bleManager: bleManager,
+                    onEnableDemoMode: {
+                        demoModeEnabled = true
+                    }
+                )
+            } else {
+                DevicePairingView(
+                    bleManager: bleManager,
+                    onEnableDemoMode: {
+                        demoModeEnabled = true
+                    }
+                )
             }
         }
         .onAppear {

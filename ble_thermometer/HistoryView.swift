@@ -37,11 +37,11 @@ class HistoryDataManager: ObservableObject {
         var predicate: Predicate<SensorReading>
         if let deviceId = deviceId {
             predicate = #Predicate<SensorReading> { reading in
-                reading.timestamp >= startDate && reading.deviceId == deviceId
+                reading.timestamp >= startDate && reading.timestamp <= now && reading.deviceId == deviceId
             }
         } else {
             predicate = #Predicate<SensorReading> { reading in
-                reading.timestamp >= startDate
+                reading.timestamp >= startDate && reading.timestamp <= now
             }
         }
         
@@ -316,15 +316,6 @@ struct HistoryView: View {
                             bleManager.requestSyncData()
                         }) {
                             Label("Sync Recent Data", systemImage: "arrow.triangle.2.circlepath")
-                        }
-                        
-                        Divider()
-                        
-                        Button(action: {
-                            bleManager.resetLastSyncTimestamp()
-                            bleManager.requestSyncData()
-                        }) {
-                            Label("Request All Data", systemImage: "arrow.down.doc")
                         }
                     } label: {
                         if bleManager.syncState.isSyncing {

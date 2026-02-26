@@ -129,7 +129,7 @@ final class UserSettings: ObservableObject {
     var userName: String
     var userEmail: String
     
-    init(measurementInterval: Int = 60, 
+    init(measurementInterval: Int = 300, 
          temperatureUnit: TemperatureUnit = .celsius, 
          co2AlertThreshold: Double = 2000,
          notificationsEnabled: Bool = true,

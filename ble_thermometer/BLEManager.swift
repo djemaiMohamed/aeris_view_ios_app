@@ -44,7 +44,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     @Published var co2Value: Double = 0.0 // Last CO2 value received (PPM)
     @Published var tempValue: Double = 0.0 // Last temperature value received (degrees)
     @Published var humValue: Double = 0.0 // Last humidity value received (percentage)
-    @Published var measurementInterval: Int = 30 // Measurement interval in seconds
+    @Published var measurementInterval: Int = 300 // Measurement interval in seconds
     @Published var isTempCelsius: Bool = true // Temperature unit flag
     @Published var isConnecting: Bool = false
     @Published var connectionStatus: String = "Disconnected"

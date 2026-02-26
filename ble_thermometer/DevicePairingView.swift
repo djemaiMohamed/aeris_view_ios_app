@@ -5,6 +5,7 @@ struct DevicePairingView: View {
     @ObservedObject var bleManager: BLEManager
     @State private var isScanning = false
     var autoStartScan: Bool = false
+    var onEnableDemoMode: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     
     var body: some View {
@@ -122,6 +123,17 @@ struct DevicePairingView: View {
                     .background(isScanning ? Color.red : Color.blue)
                     .cornerRadius(12)
                 }
+                .padding(.horizontal)
+
+                Button("Continue in Demo Mode") {
+                    if isScanning {
+                        bleManager.stopScan()
+                        isScanning = false
+                    }
+                    onEnableDemoMode?()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
                 .padding(.horizontal)
                 .padding(.bottom, 30)
             }

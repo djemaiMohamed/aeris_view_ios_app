@@ -3,6 +3,7 @@ import CoreBluetooth
 
 struct OnboardingView: View {
     @ObservedObject var bleManager: BLEManager
+    var onEnableDemoMode: (() -> Void)? = nil
     @State private var currentPage = 0
     
     var body: some View {
@@ -26,7 +27,11 @@ struct OnboardingView: View {
             .tag(1)
             
             // Bluetooth Setup Page
-            BluetoothSetupPage(bleManager: bleManager, pageIndex: 2)
+            BluetoothSetupPage(
+                bleManager: bleManager,
+                pageIndex: 2,
+                onEnableDemoMode: onEnableDemoMode
+            )
                 .tag(2)
         }
         .tabViewStyle(PageTabViewStyle())
@@ -70,6 +75,7 @@ struct OnboardingPage: View {
 struct BluetoothSetupPage: View {
     @ObservedObject var bleManager: BLEManager
     let pageIndex: Int
+    var onEnableDemoMode: (() -> Void)? = nil
     
     var body: some View {
         VStack(spacing: 40) {
@@ -103,6 +109,12 @@ struct BluetoothSetupPage: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
             }
+
+            Button("Continue in Demo Mode") {
+                onEnableDemoMode?()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
             
             Spacer()
         }

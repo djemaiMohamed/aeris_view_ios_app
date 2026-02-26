@@ -104,7 +104,7 @@ private struct DeviceSettingsSectionView: View {
                 SettingsRow(
                     icon: "clock.fill",
                     title: "Measurement Interval",
-                    value: "\(settings.measurementInterval)s",
+                    value: formatMeasurementInterval(settings.measurementInterval),
                     color: .blue
                 )
             }
@@ -135,6 +135,16 @@ private struct DeviceSettingsSectionView: View {
                     color: .red
                 )
             }
+        }
+    }
+
+    private func formatMeasurementInterval(_ seconds: Int) -> String {
+        if seconds < 3600 {
+            let minutes = max(1, seconds / 60)
+            return "\(minutes) minute\(minutes == 1 ? "" : "s")"
+        } else {
+            let hours = seconds / 3600
+            return "\(hours) hour\(hours == 1 ? "" : "s")"
         }
     }
 }
@@ -226,6 +236,7 @@ private struct CalibrationSectionView: View {
             Text("The device reported calibration finished successfully.")
         }
     }
+
 }
 
 private struct NotificationsSectionView: View {
@@ -247,29 +258,6 @@ private struct NotificationsSectionView: View {
                     value: nil,
                     color: .purple
                 )
-            }
-            
-            if settings.notificationsEnabled {
-                Button("Test Notification") {
-                    testNotification()
-                }
-                .foregroundColor(.blue)
-            }
-        }
-    }
-    
-    private func testNotification() {
-        let content = UNMutableNotificationContent()
-        content.title = "Test Notification"
-        content.body = "This is a test notification from Air Quality Monitor."
-        content.sound = UNNotificationSound.default
-        
-        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: trigger)
-        
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error = error {
-                print("Error sending test notification: \(error)")
             }
         }
     }
@@ -427,7 +415,7 @@ struct MeasurementIntervalView: View {
     @Environment(\.dismiss) private var dismiss
     let onIntervalChanged: ((Int) -> Void)?
     
-    private let intervals = [30, 60, 120, 300, 600] // seconds
+    private let intervals = [60, 120, 300, 600, 1200, 1800, 3600] // seconds
     
     var body: some View {
         List {
@@ -457,11 +445,12 @@ struct MeasurementIntervalView: View {
     }
     
     private func formatInterval(_ seconds: Int) -> String {
-        if seconds < 60 {
-            return "\(seconds) seconds"
-        } else {
-            let minutes = seconds / 60
+        if seconds < 3600 {
+            let minutes = max(1, seconds / 60)
             return "\(minutes) minute\(minutes == 1 ? "" : "s")"
+        } else {
+            let hours = seconds / 3600
+            return "\(hours) hour\(hours == 1 ? "" : "s")"
         }
     }
 }
