@@ -299,7 +299,7 @@ struct HistoryView: View {
                         } else {
                             ForEach(bleManager.connectedPeripherals, id: \.identifier) { p in
                                 Button(action: { bleManager.setActivePeripheral(p) }) {
-                                    Label(p.name ?? "Unknown", systemImage: bleManager.activePeripheral?.identifier == p.identifier ? "checkmark.circle.fill" : "circle")
+                                    Label(bleManager.displayName(for: p), systemImage: bleManager.activePeripheral?.identifier == p.identifier ? "checkmark.circle.fill" : "circle")
                                 }
                             }
                         }

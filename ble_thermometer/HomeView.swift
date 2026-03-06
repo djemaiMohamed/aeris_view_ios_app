@@ -53,7 +53,7 @@ struct HomeView: View {
                         } else {
                             ForEach(bleManager.connectedPeripherals, id: \.identifier) { p in
                                 Button(action: { bleManager.setActivePeripheral(p) }) {
-                                    Label(p.name ?? "Unknown", systemImage: bleManager.activePeripheral?.identifier == p.identifier ? "checkmark.circle.fill" : "circle")
+                                    Label(bleManager.displayName(for: p), systemImage: bleManager.activePeripheral?.identifier == p.identifier ? "checkmark.circle.fill" : "circle")
                                 }
                             }
                         }
@@ -96,7 +96,7 @@ struct ConnectionStatusCard: View {
                     .font(.headline)
                 
                 if let peripheral = activeDevice {
-                    Text(peripheral.name ?? "Unknown Device")
+                    Text(bleManager.displayName(for: peripheral))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 } else {

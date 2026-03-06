@@ -3,13 +3,32 @@ import SwiftUI
 struct DeviceInfoView: View {
     @ObservedObject var bleManager: BLEManager
     @Environment(\.dismiss) private var dismiss
+    @State private var showRenameAlert = false
+    @State private var renameText = ""
     
     var body: some View {
         NavigationView {
             List {
                 Section("Device Information") {
-                    InfoRow(label: "Name", value: bleManager.connectedPeripheral?.name ?? "Unknown")
-                    InfoRow(label: "Identifier", value: bleManager.connectedPeripheral?.identifier.uuidString ?? "N/A")
+                    if let device = bleManager.activePeripheral ?? bleManager.connectedPeripheral {
+                        InfoRow(label: "Display Name", value: bleManager.displayName(for: device))
+                        InfoRow(label: "BLE Name", value: device.name ?? "Unknown")
+                        Button {
+                            renameText = bleManager.displayName(for: device)
+                            showRenameAlert = true
+                        } label: {
+                            HStack {
+                                Text("Rename Device")
+                                    .foregroundColor(.blue)
+                                Spacer()
+                                Image(systemName: "pencil")
+                                    .foregroundColor(.blue)
+                            }
+                        }
+                    } else {
+                        InfoRow(label: "Name", value: "Unknown")
+                    }
+                    InfoRow(label: "Identifier", value: (bleManager.activePeripheral ?? bleManager.connectedPeripheral)?.identifier.uuidString ?? "N/A")
                     InfoRow(label: "State", value: bleManager.connectionStatus)
                     InfoRow(label: "Bonded", value: bleManager.isBonded ? "Yes" : "No")
                 }
@@ -57,6 +76,22 @@ struct DeviceInfoView: View {
                         dismiss()
                     }
                 }
+            }
+            .alert("Rename Device", isPresented: $showRenameAlert) {
+                TextField("Device name", text: $renameText)
+                Button("Save") {
+                    if let device = bleManager.activePeripheral ?? bleManager.connectedPeripheral {
+                        bleManager.renameDevice(device, to: renameText)
+                    }
+                }
+                Button("Reset to Default", role: .destructive) {
+                    if let device = bleManager.activePeripheral ?? bleManager.connectedPeripheral {
+                        bleManager.renameDevice(device, to: nil)
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Enter a custom name (e.g. Living Room, Bedroom)")
             }
         }
     }

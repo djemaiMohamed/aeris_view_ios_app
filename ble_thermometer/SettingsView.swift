@@ -45,7 +45,7 @@ struct SettingsView: View {
                         HStack {
                             Image(systemName: "antenna.radiowaves.left.and.right")
                                 .foregroundColor(.blue)
-                            Text("Settings for: **\(active.name ?? "Unknown")**")
+                            Text("Settings for: **\(bleManager.displayName(for: active))**")
                                 .font(.subheadline)
                         }
                     }
@@ -71,7 +71,7 @@ struct SettingsView: View {
                         } else {
                             ForEach(bleManager.connectedPeripherals, id: \.identifier) { p in
                                 Button(action: { bleManager.setActivePeripheral(p) }) {
-                                    Label(p.name ?? "Unknown", systemImage: bleManager.activePeripheral?.identifier == p.identifier ? "checkmark.circle.fill" : "circle")
+                                    Label(bleManager.displayName(for: p), systemImage: bleManager.activePeripheral?.identifier == p.identifier ? "checkmark.circle.fill" : "circle")
                                 }
                             }
                         }
@@ -282,10 +282,27 @@ private struct NotificationsSectionView: View {
 
 private struct DeviceManagementSectionView: View {
     @ObservedObject var bleManager: BLEManager
+    @State private var showRenameAlert = false
+    @State private var renameText = ""
     
     var body: some View {
         Section("Device Management") {
             if bleManager.isBonded {
+                // Rename device
+                if let active = bleManager.activePeripheral {
+                    Button {
+                        renameText = bleManager.displayName(for: active)
+                        showRenameAlert = true
+                    } label: {
+                        SettingsRow(
+                            icon: "pencil.line",
+                            title: "Rename Device",
+                            value: bleManager.displayName(for: active),
+                            color: .blue
+                        )
+                    }
+                }
+                
                 SettingsRow(
                     icon: batteryIcon(for: bleManager.batteryLevel),
                     title: "Battery Level",
@@ -299,7 +316,7 @@ private struct DeviceManagementSectionView: View {
                     SettingsRow(
                         icon: "wifi.slash",
                         title: "Forget This Device",
-                        value: bleManager.activePeripheral?.name ?? bleManager.connectedPeripheral?.name ?? "N/A",
+                        value: bleManager.activePeripheral.map { bleManager.displayName(for: $0) } ?? "N/A",
                         color: .red
                     )
                 }
@@ -318,6 +335,22 @@ private struct DeviceManagementSectionView: View {
                     color: .gray
                 )
             }
+        }
+        .alert("Rename Device", isPresented: $showRenameAlert) {
+            TextField("Device name", text: $renameText)
+            Button("Save") {
+                if let active = bleManager.activePeripheral {
+                    bleManager.renameDevice(active, to: renameText)
+                }
+            }
+            Button("Reset to Default", role: .destructive) {
+                if let active = bleManager.activePeripheral {
+                    bleManager.renameDevice(active, to: nil)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Enter a custom name for this device (e.g. Living Room, Bedroom)")
         }
     }
     

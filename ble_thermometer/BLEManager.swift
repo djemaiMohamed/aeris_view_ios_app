@@ -20,6 +20,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         var calibrationInProgress: Bool = false
         var calibrationFinished: Bool = false
         var calibrationStatusMessage: String = ""
+        var customName: String? = nil
     }
 
     private enum SyncCompletionReason {
@@ -82,6 +83,9 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     // Store last known values per device so we can swap views instantly
     private var deviceSnapshots: [UUID: DeviceSnapshot] = [:]
     
+    // MARK: - Custom Device Names (persisted in UserDefaults)
+    @Published var customDeviceNames: [String: String] = [:] // [UUID string : custom name]
+    
     // MARK: - BLE Core Properties
     var centralManager: CBCentralManager!
     var serviceDiscoveryCompletion: (([CBService]) -> Void)?
@@ -123,6 +127,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         requestNotificationPermission()
         loadLastSyncTimestamp()
         loadLastSyncStartIndex()
+        loadCustomDeviceNames()
         registerLifecycleNotifications()
     }
     
@@ -663,7 +668,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             humidity: snapshot.hum,
             isCelsius: snapshot.isCelsius,
             deviceId: peripheral.identifier.uuidString,
-            deviceName: peripheral.name ?? "Unknown"
+            deviceName: displayName(for: peripheral)
         )
         
         context.insert(reading)
@@ -997,7 +1002,51 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     }
     
     func activeDeviceDisplayName() -> String {
-        activePeripheral?.name ?? "Air Quality"
+        if let active = activePeripheral {
+            return displayName(for: active)
+        }
+        return "Air Quality"
+    }
+    
+    /// Returns the display name for a peripheral: custom name > BLE name > "Device N"
+    func displayName(for peripheral: CBPeripheral) -> String {
+        let uuidStr = peripheral.identifier.uuidString
+        if let custom = customDeviceNames[uuidStr], !custom.isEmpty {
+            return custom
+        }
+        if let bleName = peripheral.name, !bleName.isEmpty {
+            return bleName
+        }
+        // Auto-number: find this device's position among connected peripherals
+        if let idx = connectedPeripherals.firstIndex(where: { $0.identifier == peripheral.identifier }) {
+            return "Device \(idx + 1)"
+        }
+        return "Unknown Device"
+    }
+    
+    /// Rename a device. Pass nil or empty string to revert to the BLE/default name.
+    func renameDevice(_ peripheral: CBPeripheral, to newName: String?) {
+        let uuidStr = peripheral.identifier.uuidString
+        if let name = newName, !name.trimmingCharacters(in: .whitespaces).isEmpty {
+            customDeviceNames[uuidStr] = name.trimmingCharacters(in: .whitespaces)
+        } else {
+            customDeviceNames.removeValue(forKey: uuidStr)
+        }
+        saveCustomDeviceNames()
+        // Also update the snapshot
+        var snap = deviceSnapshots[peripheral.identifier] ?? DeviceSnapshot()
+        snap.customName = customDeviceNames[uuidStr]
+        deviceSnapshots[peripheral.identifier] = snap
+    }
+    
+    private func saveCustomDeviceNames() {
+        UserDefaults.standard.set(customDeviceNames, forKey: "customDeviceNames")
+    }
+    
+    private func loadCustomDeviceNames() {
+        if let saved = UserDefaults.standard.dictionary(forKey: "customDeviceNames") as? [String: String] {
+            customDeviceNames = saved
+        }
     }
     
     /// Resets the calibrationFinished flag for the active device so the
@@ -1383,7 +1432,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         
         let reading = sample.toSensorReading(
             deviceId: peripheral.identifier.uuidString,
-            deviceName: peripheral.name ?? "Unknown"
+            deviceName: displayName(for: peripheral)
         )
         
         context.insert(reading)
