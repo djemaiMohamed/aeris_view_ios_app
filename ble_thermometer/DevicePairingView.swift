@@ -46,7 +46,7 @@ struct DevicePairingView: View {
                             .foregroundColor(.secondary)
                     }
                     .padding()
-                } else if isScanning {
+                } else if bleManager.peripherals.isEmpty && isScanning {
                     VStack(spacing: 20) {
                         ProgressView()
                             .scaleEffect(1.5)
@@ -57,6 +57,18 @@ struct DevicePairingView: View {
                     }
                     .padding()
                 } else {
+                    // Show scanning indicator above the list while still scanning
+                    if isScanning {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                            Text("Scanning for more devices...")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.vertical, 6)
+                    }
+
                     List {
                         ForEach(bleManager.peripherals, id: \.identifier) { peripheral in
                             DeviceRow(
@@ -73,26 +85,6 @@ struct DevicePairingView: View {
                 }
                 
                 Spacer()
-                
-                // Auto-connect to Air Quality device button
-                if !bleManager.getAirQualityDevices().isEmpty {
-                    Button(action: {
-                        let _ = bleManager.connectToFirstAirQualityDevice()
-                    }) {
-                        HStack {
-                            Image(systemName: "leaf.fill")
-                            Text("Connect to Air Quality Device")
-                        }
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(Color.green)
-                        .cornerRadius(12)
-                    }
-                    .padding(.horizontal)
-                    .padding(.bottom, 10)
-                }
                 
                 // Scan Button
                 Button(action: {
@@ -178,67 +170,40 @@ struct DeviceRow: View {
     let onTap: () -> Void
     @ObservedObject var bleManager: BLEManager
     
-    private var isAirQualityDevice: Bool {
-        bleManager.isAirQualityDevice(peripheral)
-    }
-    
     var body: some View {
         Button(action: onTap) {
             HStack {
-                // Device type icon
-                Image(systemName: isAirQualityDevice ? "leaf.fill" : "sensor.fill")
-                    .foregroundColor(isAirQualityDevice ? .green : .blue)
+                Image(systemName: "sensor.fill")
+                    .foregroundColor(.blue)
                     .font(.title2)
                 
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(peripheral.name ?? "Unknown Device")
-                            .font(.headline)
-                            .foregroundColor(.primary)
-                        
-                        if isAirQualityDevice {
-                            Text("PRIORITY")
-                                .font(.caption2)
-                                .fontWeight(.bold)
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.green)
-                                .cornerRadius(4)
-                        }
-                    }
+                    Text(peripheral.name ?? "Unknown Device")
+                        .font(.headline)
+                        .foregroundColor(.primary)
                     
-                    HStack {
-                        Text(peripheral.identifier.uuidString.prefix(8) + "...")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        
-                        Spacer()
-                        
-                        if isAirQualityDevice {
-                            Text("Air Quality Device")
-                                .font(.caption)
-                                .foregroundColor(.green)
-                                .fontWeight(.medium)
-                        }
-                    }
+                    Text(peripheral.identifier.uuidString.prefix(8) + "...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
                 
                 Spacer()
                 
                 if isConnecting {
-                    ProgressView()
-                        .scaleEffect(0.8)
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("Connecting...")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
                 } else {
-                    Image(systemName: "chevron.right")
-                        .foregroundColor(isAirQualityDevice ? .green : .blue)
+                    Text("Tap to connect")
+                        .font(.caption)
+                        .foregroundColor(.blue)
                 }
             }
             .padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(isAirQualityDevice ? Color.green.opacity(0.1) : Color.clear)
-            )
         }
         .disabled(isConnecting)
     }

@@ -13,6 +13,13 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         var hum: Double = 0
         var isCelsius: Bool = true
         var battery: Int = 0
+        var lastUpdateTime: Date = Date()
+        var measurementInterval: Int = 300
+        var temperatureUnit: TemperatureUnit = .celsius
+        var co2AlertThreshold: Double = 2000
+        var calibrationInProgress: Bool = false
+        var calibrationFinished: Bool = false
+        var calibrationStatusMessage: String = ""
     }
 
     private enum SyncCompletionReason {
@@ -484,11 +491,15 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         case measurementIntervalUUID:
             print("Measurement interval updated: \(stringValue)")
             if let interval = decodeMeasurementInterval(from: stringValue) {
-                measurementInterval = interval
+                snapshot.measurementInterval = interval
+                if peripheral.identifier == activePeripheral?.identifier {
+                    measurementInterval = interval
+                }
                 print("Measurement interval set to \(interval) seconds")
                 
-                // Update UserSettings if available
-                if let settings = userSettings {
+                // Update UserSettings if available (only for active device)
+                if peripheral.identifier == activePeripheral?.identifier,
+                   let settings = userSettings {
                     settings.measurementInterval = interval
                     // Save the context if available
                     if let context = modelContext {
@@ -513,10 +524,19 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         case calibrationCharUUID:
             // Device sends 0x01 when calibration finishes
             if data.count >= 1, data[0] == 0x01 {
-                DispatchQueue.main.async {
-                    self.calibrationInProgress = false
-                    self.calibrationFinished = true
-                    self.calibrationStatusMessage = "Calibration finished."
+                // Update per-device calibration state
+                var calSnap = deviceSnapshots[peripheral.identifier] ?? DeviceSnapshot()
+                calSnap.calibrationInProgress = false
+                calSnap.calibrationFinished = true
+                calSnap.calibrationStatusMessage = "Calibration finished."
+                deviceSnapshots[peripheral.identifier] = calSnap
+                
+                if peripheral.identifier == activePeripheral?.identifier {
+                    DispatchQueue.main.async {
+                        self.calibrationInProgress = false
+                        self.calibrationFinished = true
+                        self.calibrationStatusMessage = "Calibration finished."
+                    }
                 }
                 print("✅ Calibration finished notification received")
             } else {
@@ -524,16 +544,23 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             }
         case syncDataCharUUID:
             // Handle sync data notifications (both historical and live samples)
+            // Sync handler manages its own snapshots and saves – return early
+            // to avoid overwriting snapshot with the stale local copy.
             handleSyncDataNotification(data: data, peripheral: peripheral)
+            return
         default:
             break
         }
-        
+
+    // Update per-device update timestamp
+    snapshot.lastUpdateTime = Date()
+
     // Persist snapshot
     deviceSnapshots[peripheral.identifier] = snapshot
 
-    // Update air quality level based on CO2 values only for active device
+    // Update published values & air quality for the active device
         if peripheral.identifier == activePeripheral?.identifier {
+            lastUpdateTime = Date()
             updateAirQualityLevel()
         }
         
@@ -615,21 +642,26 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     }
 
     // MARK: - Data Management
-    private var lastSaveTime: Date = Date()
+    private var lastSaveTimes: [UUID: Date] = [:]
     private let minimumSaveInterval: TimeInterval = 60 // Save at most once per minute
     
     private func saveSensorReading(peripheral: CBPeripheral) {
         guard let context = modelContext else { return }
         
-        // Throttle database saves to improve performance
+        // Throttle database saves per device to improve performance
         let now = Date()
-        guard now.timeIntervalSince(lastSaveTime) >= minimumSaveInterval else { return }
+        let lastSave = lastSaveTimes[peripheral.identifier] ?? .distantPast
+        guard now.timeIntervalSince(lastSave) >= minimumSaveInterval else { return }
+        
+        // Use per-device snapshot so background devices save their own values
+        let snapshot = deviceSnapshots[peripheral.identifier] ?? DeviceSnapshot()
+        guard snapshot.co2 > 0 else { return } // Don't save empty readings
         
         let reading = SensorReading(
-            co2Value: co2Value,
-            temperature: tempValue,
-            humidity: humValue,
-            isCelsius: isTempCelsius,
+            co2Value: snapshot.co2,
+            temperature: snapshot.temp,
+            humidity: snapshot.hum,
+            isCelsius: snapshot.isCelsius,
             deviceId: peripheral.identifier.uuidString,
             deviceName: peripheral.name ?? "Unknown"
         )
@@ -638,7 +670,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         
         do {
             try context.save()
-            lastSaveTime = now
+            lastSaveTimes[peripheral.identifier] = now
             
             // Clean up old readings to prevent database bloat
             cleanupOldReadings(context: context)
@@ -781,6 +813,18 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                     let data = Data(bytes: &intervalValue, count: MemoryLayout<UInt16>.size)
                     
                     writeValue(for: characteristic, of: peripheral, value: data)
+                    
+                    // Immediately persist to the device snapshot so the value
+                    // survives device switches (this char is read-only, not notified,
+                    // so no BLE callback will update the snapshot after the write).
+                    var snap = deviceSnapshots[peripheral.identifier] ?? DeviceSnapshot()
+                    snap.measurementInterval = interval
+                    deviceSnapshots[peripheral.identifier] = snap
+                    measurementInterval = interval
+                    
+                    // Re-read from device to confirm the written value
+                    peripheral.readValue(for: characteristic)
+                    
                     print("📝 Writing measurement interval: \(interval) seconds")
                     return
                 }
@@ -809,6 +853,18 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                     let data = Data([unitValue])
                     
                     writeValue(for: characteristic, of: peripheral, value: data)
+                    
+                    // Immediately persist to the device snapshot (same reason as
+                    // measurement interval – this char is read-only, not notified).
+                    var snap = deviceSnapshots[peripheral.identifier] ?? DeviceSnapshot()
+                    snap.isCelsius = isCelsius
+                    snap.temperatureUnit = isCelsius ? .celsius : .fahrenheit
+                    deviceSnapshots[peripheral.identifier] = snap
+                    self.isTempCelsius = isCelsius
+                    
+                    // Re-read from device to confirm
+                    peripheral.readValue(for: characteristic)
+                    
                     print("📝 Writing temperature unit: \(isCelsius ? "Celsius" : "Fahrenheit")")
                     return
                 }
@@ -827,6 +883,12 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         calibrationFinished = false
         calibrationInProgress = true
         calibrationStatusMessage = "Calibration started. Keep device outdoors in fresh air."
+        // Track per-device calibration state
+        var calSnap = deviceSnapshots[peripheral.identifier] ?? DeviceSnapshot()
+        calSnap.calibrationInProgress = true
+        calSnap.calibrationFinished = false
+        calSnap.calibrationStatusMessage = calibrationStatusMessage
+        deviceSnapshots[peripheral.identifier] = calSnap
         // Find characteristic
         guard let services = peripheral.services else {
             print("No services discovered yet")
@@ -845,6 +907,11 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         print("❌ Calibration characteristic not found")
         calibrationStatusMessage = "Calibration characteristic not found."
         calibrationInProgress = false
+        // Update per-device snapshot on failure
+        var failSnap = deviceSnapshots[peripheral.identifier] ?? DeviceSnapshot()
+        failSnap.calibrationInProgress = false
+        failSnap.calibrationStatusMessage = calibrationStatusMessage
+        deviceSnapshots[peripheral.identifier] = failSnap
     }
     
     // MARK: - Computed Properties for User Preferences
@@ -865,19 +932,83 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
 
     // MARK: - Multi-device helpers
     func setActivePeripheral(_ peripheral: CBPeripheral) {
+        // Save current active device's published values back into its snapshot
+        // so nothing is lost when we switch away.
+        if let prev = activePeripheral {
+            var prevSnap = deviceSnapshots[prev.identifier] ?? DeviceSnapshot()
+            prevSnap.co2 = co2Value
+            prevSnap.temp = tempValue
+            prevSnap.hum = humValue
+            prevSnap.isCelsius = isTempCelsius
+            prevSnap.battery = batteryLevel
+            prevSnap.lastUpdateTime = lastUpdateTime
+            prevSnap.measurementInterval = measurementInterval
+            prevSnap.calibrationInProgress = calibrationInProgress
+            prevSnap.calibrationFinished = calibrationFinished
+            prevSnap.calibrationStatusMessage = calibrationStatusMessage
+            // Save app-level settings that the user may have changed for this device
+            if let settings = userSettings {
+                prevSnap.temperatureUnit = settings.temperatureUnit
+                prevSnap.co2AlertThreshold = settings.co2AlertThreshold
+            }
+            deviceSnapshots[prev.identifier] = prevSnap
+        }
+
         activePeripheral = peripheral
-        if let snapshot = deviceSnapshots[peripheral.identifier] {
+        connectedPeripheral = peripheral
+
+        let snapshot = deviceSnapshots[peripheral.identifier] ?? DeviceSnapshot()
+        if snapshot.co2 > 0 {
             co2Value = snapshot.co2
             tempValue = snapshot.temp
             humValue = snapshot.hum
             isTempCelsius = snapshot.isCelsius
             batteryLevel = snapshot.battery
+            lastUpdateTime = snapshot.lastUpdateTime
+            measurementInterval = snapshot.measurementInterval
+            calibrationInProgress = snapshot.calibrationInProgress
+            calibrationFinished = snapshot.calibrationFinished
+            calibrationStatusMessage = snapshot.calibrationStatusMessage
             updateAirQualityLevel()
+        } else {
+            // No data received yet from this device – show waiting state
+            co2Value = 0
+            tempValue = 0
+            humValue = 0
+            isTempCelsius = true
+            batteryLevel = 0
+            lastUpdateTime = Date()
+            measurementInterval = snapshot.measurementInterval
+            calibrationInProgress = snapshot.calibrationInProgress
+            calibrationFinished = snapshot.calibrationFinished
+            calibrationStatusMessage = snapshot.calibrationStatusMessage
+            airQualityLevel = .waitingForData
+        }
+
+        // Sync all per-device settings into the shared UserSettings
+        if let settings = userSettings {
+            settings.measurementInterval = measurementInterval
+            settings.temperatureUnit = snapshot.temperatureUnit
+            settings.co2AlertThreshold = snapshot.co2AlertThreshold
+            if let context = modelContext {
+                try? context.save()
+            }
         }
     }
     
     func activeDeviceDisplayName() -> String {
         activePeripheral?.name ?? "Air Quality"
+    }
+    
+    /// Resets the calibrationFinished flag for the active device so the
+    /// completion alert is only shown once (not on every device switch).
+    func clearCalibrationFinished() {
+        calibrationFinished = false
+        if let active = activePeripheral {
+            var snap = deviceSnapshots[active.identifier] ?? DeviceSnapshot()
+            snap.calibrationFinished = false
+            deviceSnapshots[active.identifier] = snap
+        }
     }
     
     // MARK: - Testing/Debug Methods
@@ -1277,6 +1408,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         snapshot.hum = Double(sample.humidity)
         snapshot.isCelsius = true
         snapshot.battery = sample.battery
+        snapshot.lastUpdateTime = Date()
         
         deviceSnapshots[peripheral.identifier] = snapshot
         

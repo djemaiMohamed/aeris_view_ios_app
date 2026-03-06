@@ -1,5 +1,6 @@
 import SwiftUI
 import Charts
+import CoreBluetooth
 
 struct HomeView: View {
     @ObservedObject var bleManager: BLEManager
@@ -77,17 +78,24 @@ struct HomeView: View {
 struct ConnectionStatusCard: View {
     @ObservedObject var bleManager: BLEManager
     
+    /// Use activePeripheral so the card reflects the currently selected device.
+    private var activeDevice: CBPeripheral? { bleManager.activePeripheral }
+    private var isActiveConnected: Bool {
+        guard let active = activeDevice else { return false }
+        return bleManager.connectedPeripherals.contains(where: { $0.identifier == active.identifier })
+    }
+    
     var body: some View {
         HStack {
-            Image(systemName: bleManager.connectedPeripheral != nil ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+            Image(systemName: isActiveConnected ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                 .font(.title2)
-                .foregroundColor(bleManager.connectedPeripheral != nil ? .green : .orange)
+                .foregroundColor(isActiveConnected ? .green : .orange)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text(bleManager.connectionStatus)
+                Text(isActiveConnected ? "Connected" : bleManager.connectionStatus)
                     .font(.headline)
                 
-                if let peripheral = bleManager.connectedPeripheral {
+                if let peripheral = activeDevice {
                     Text(peripheral.name ?? "Unknown Device")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -100,6 +108,17 @@ struct ConnectionStatusCard: View {
             
             Spacer()
             
+            // Show number of connected devices when more than one
+            if bleManager.connectedPeripherals.count > 1 {
+                Text("\(bleManager.connectedPeripherals.count) devices")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color(.systemGray5))
+                    .cornerRadius(8)
+            }
+            
             if bleManager.isConnecting {
                 ProgressView()
                     .scaleEffect(0.8)
@@ -109,7 +128,7 @@ struct ConnectionStatusCard: View {
         .background(Color(.systemGray6))
         .cornerRadius(12)
         .onTapGesture {
-            if bleManager.connectedPeripheral == nil && !bleManager.peripherals.isEmpty {
+            if !isActiveConnected && !bleManager.peripherals.isEmpty {
                 bleManager.connect(peripheral: bleManager.peripherals.first!)
             }
         }

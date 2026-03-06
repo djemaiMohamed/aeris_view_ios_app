@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import UserNotifications
+import CoreBluetooth
 
 struct SettingsView: View {
     @ObservedObject var bleManager: BLEManager
@@ -37,6 +38,19 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             List {
+                // Show which device settings apply to when multiple devices connected
+                if bleManager.connectedPeripherals.count > 1,
+                   let active = bleManager.activePeripheral {
+                    Section {
+                        HStack {
+                            Image(systemName: "antenna.radiowaves.left.and.right")
+                                .foregroundColor(.blue)
+                            Text("Settings for: **\(active.name ?? "Unknown")**")
+                                .font(.subheadline)
+                        }
+                    }
+                }
+
                 DeviceSettingsSectionView(bleManager: bleManager, settings: currentSettings)
                 CalibrationSectionView(bleManager: bleManager, ppmFieldFocused: $ppmFieldFocused)
                 NotificationsSectionView(settings: currentSettings)
@@ -231,7 +245,10 @@ private struct CalibrationSectionView: View {
             if finished { showFinished = true }
         }
         .alert("Calibration Complete", isPresented: $showFinished) {
-            Button("OK", role: .cancel) {}
+            Button("OK", role: .cancel) {
+                // Clear the flag so the alert doesn't reappear on device switch
+                bleManager.clearCalibrationFinished()
+            }
         } message: {
             Text("The device reported calibration finished successfully.")
         }
@@ -282,7 +299,7 @@ private struct DeviceManagementSectionView: View {
                     SettingsRow(
                         icon: "wifi.slash",
                         title: "Forget This Device",
-                        value: bleManager.connectedPeripheral?.name ?? "N/A",
+                        value: bleManager.activePeripheral?.name ?? bleManager.connectedPeripheral?.name ?? "N/A",
                         color: .red
                     )
                 }
