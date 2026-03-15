@@ -51,7 +51,7 @@ struct ContentView: View {
                     AccountView()
                         .tabItem {
                             Image(systemName: "person.fill")
-                            Text("Account")
+                            Text("Info")
                         }
                         .tag(3)
                 }

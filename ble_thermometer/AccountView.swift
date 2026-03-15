@@ -1,14 +1,13 @@
 import SwiftUI
 import SwiftData
 import UIKit
+import PhotosUI
 
 struct AccountView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var userSettings: [UserSettings] = []
-    @State private var isEditing = false
-    @State private var tempUserName = ""
-    @State private var tempUserEmail = ""
     @State private var didEnsureSettings = false
+    @State private var showFeedbackSheet = false
     
     private var currentSettings: UserSettings {
         userSettings.first ?? UserSettings()
@@ -35,48 +34,68 @@ struct AccountView: View {
     var body: some View {
         NavigationView {
             List {
-                // Profile Section
-                Section {
-                    VStack(spacing: 16) {
-                        // Profile Image
-                        Circle()
-                            .fill(Color.blue.gradient)
-                            .frame(width: 80, height: 80)
-                            .overlay {
-                                Text(getInitials(from: currentSettings.userName))
-                                    .font(.title)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(.white)
-                            }
-                        
-                        if isEditing {
-                            VStack(spacing: 12) {
-                                TextField("Name", text: $tempUserName)
-                                    .textFieldStyle(RoundedBorderTextFieldStyle())
-                                
-                                TextField("Email", text: $tempUserEmail)
-                                    .textFieldStyle(RoundedBorderTextFieldStyle())
-                                    .keyboardType(.emailAddress)
-                                    .autocapitalization(.none)
-                            }
-                        } else {
-                            VStack(spacing: 4) {
-                                Text(currentSettings.userName.isEmpty ? "Tap to add name" : currentSettings.userName)
-                                    .font(.title2)
-                                    .fontWeight(.semibold)
-                                
-                                Text(currentSettings.userEmail.isEmpty ? "Tap to add email" : currentSettings.userEmail)
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
+                // Support Section
+                Section("Support") {
+                    NavigationLink {
+                        HelpView()
+                    } label: {
+                        AccountSettingRow(
+                            icon: "questionmark.circle.fill",
+                            title: "Help & FAQ",
+                            subtitle: nil,
+                            color: .blue
+                        )
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical)
-                    .onTapGesture {
-                        if !isEditing {
-                            startEditing()
+                    
+                    Button {
+                        showFeedbackSheet = true
+                    } label: {
+                        AccountSettingRow(
+                            icon: "envelope.fill",
+                            title: "Send Feedback",
+                            subtitle: nil,
+                            color: .green
+                        )
+                    }
+                    
+                    NavigationLink {
+                        AboutView()
+                    } label: {
+                        AccountSettingRow(
+                            icon: "info.circle.fill",
+                            title: "About",
+                            subtitle: nil,
+                            color: .gray
+                        )
+                    }
+                }
+                
+                // Company Links Section
+                Section("Connect With Us") {
+                    Button {
+                        if let url = URL(string: "https://www.getaeris.ca") {
+                            UIApplication.shared.open(url)
                         }
+                    } label: {
+                        AccountSettingRow(
+                            icon: "globe",
+                            title: "Visit Our Website",
+                            subtitle: "getaeris.ca",
+                            color: .blue
+                        )
+                    }
+                    
+                    Button {
+                        if let url = URL(string: "https://www.instagram.com/aeris_tech/") {
+                            UIApplication.shared.open(url)
+                        }
+                    } label: {
+                        AccountSettingRow(
+                            icon: "camera.fill",
+                            title: "Follow on Instagram",
+                            subtitle: "@aeris_tech",
+                            color: .pink
+                        )
                     }
                 }
                 
@@ -108,55 +127,11 @@ struct AccountView: View {
                 Section("Usage Statistics") {
                     UsageStatsView()
                 }
-                
-                // Support Section
-                Section("Support") {
-                    NavigationLink {
-                        HelpView()
-                    } label: {
-                        AccountSettingRow(
-                            icon: "questionmark.circle.fill",
-                            title: "Help & FAQ",
-                            subtitle: nil,
-                            color: .blue
-                        )
-                    }
-                    
-                    Button {
-                        sendFeedback()
-                    } label: {
-                        AccountSettingRow(
-                            icon: "envelope.fill",
-                            title: "Send Feedback",
-                            subtitle: nil,
-                            color: .green
-                        )
-                    }
-                    
-                    NavigationLink {
-                        AboutView()
-                    } label: {
-                        AccountSettingRow(
-                            icon: "info.circle.fill",
-                            title: "About",
-                            subtitle: nil,
-                            color: .gray
-                        )
-                    }
-                }
             }
-            .navigationTitle("Account")
+            .navigationTitle("Info")
             .navigationBarTitleDisplayMode(.large)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(isEditing ? "Save" : "Edit") {
-                        if isEditing {
-                            saveChanges()
-                        } else {
-                            startEditing()
-                        }
-                    }
-                }
+            .sheet(isPresented: $showFeedbackSheet) {
+                FeedbackView()
             }
             .task {
                 loadUserSettings()
@@ -165,44 +140,6 @@ struct AccountView: View {
         }
     }
     
-    private func getInitials(from name: String) -> String {
-        if name.isEmpty { return "U" }
-        
-        let components = name.components(separatedBy: " ")
-        let initials = components.compactMap { $0.first }.map { String($0) }
-        
-        if initials.count >= 2 {
-            return "\(initials[0])\(initials[1])".uppercased()
-        } else if let first = initials.first {
-            return first.uppercased()
-        } else {
-            return "U"
-        }
-    }
-    
-    private func startEditing() {
-        tempUserName = currentSettings.userName
-        tempUserEmail = currentSettings.userEmail
-        isEditing = true
-    }
-    
-    private func saveChanges() {
-        currentSettings.userName = tempUserName
-        currentSettings.userEmail = tempUserEmail
-        
-        do {
-            try modelContext.save()
-            isEditing = false
-        } catch {
-            print("Error saving user settings: \(error)")
-        }
-    }
-    
-    private func sendFeedback() {
-        if let url = URL(string: "mailto:feedback@airqualitymonitor.com?subject=Air Quality Monitor Feedback") {
-            UIApplication.shared.open(url)
-        }
-    }
 }
 
 struct AccountSettingRow: View {
@@ -393,11 +330,11 @@ struct AboutView: View {
                     .font(.system(size: 80))
                     .foregroundColor(.green)
                 
-                Text("Air Quality Monitor")
+                Text("Aeris View")
                     .font(.largeTitle)
                     .fontWeight(.bold)
                 
-                Text("Version 1.0.0")
+                Text("Version 1.0")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
             }
@@ -406,7 +343,7 @@ struct AboutView: View {
                 Text("About This App")
                     .font(.headline)
                 
-                Text("Air Quality Monitor helps you track and improve your indoor environment by monitoring CO2, temperature, and humidity levels in real-time. Get insights, receive alerts, and maintain a healthy living space.")
+                Text("Aeris View helps you track and improve your indoor environment by monitoring CO2, temperature, and humidity levels in real-time. Get insights, receive alerts, and maintain a healthy living space.")
                     .font(.body)
                     .foregroundColor(.secondary)
             }
@@ -415,9 +352,19 @@ struct AboutView: View {
                 Text("Developer")
                     .font(.headline)
                 
-                Text("Developed by Mohamed Djemai with ❤️ for healthier indoor environments.")
+                Text("Developed by Aeris Technology with ❤️ for healthier indoor environments.")
                     .font(.body)
                     .foregroundColor(.secondary)
+                
+                Button {
+                    if let url = URL(string: "https://www.getaeris.ca") {
+                        UIApplication.shared.open(url)
+                    }
+                } label: {
+                    Text("getaeris.ca")
+                        .font(.body)
+                        .foregroundColor(.blue)
+                }
             }
             
             Spacer()
@@ -425,6 +372,172 @@ struct AboutView: View {
         .padding()
         .navigationTitle("About")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct FeedbackView: View {
+    @Environment(\.dismiss) private var dismiss
+    
+    @State private var feedbackText = ""
+    @State private var userName = ""
+    @State private var userEmail = ""
+    @State private var selectedPhotoItem: PhotosPickerItem? = nil
+    @State private var attachedImage: UIImage? = nil
+    @State private var showConfirmation = false
+    @State private var isSubmitting = false
+
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+    }
+
+    private var deviceModel: String {
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        let machineMirror = Mirror(reflecting: systemInfo.machine)
+        let identifier = machineMirror.children.reduce("") { id, element in
+            guard let value = element.value as? Int8, value != 0 else { return id }
+            return id + String(UnicodeScalar(UInt8(value)))
+        }
+        return identifier
+    }
+
+    private var systemVersion: String {
+        UIDevice.current.systemVersion
+    }
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("We'd love to hear from you! 💬")
+                            .font(.headline)
+                        Text("Your feedback helps us improve Aeris View. Positive reviews may be featured as a testimonial on our website — so don't hold back!")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                Section("Your Details (Optional)") {
+                    TextField("Your Name", text: $userName)
+                    TextField("Your Email", text: $userEmail)
+                        .keyboardType(.emailAddress)
+                        .autocapitalization(.none)
+                }
+
+                Section("Your Feedback") {
+                    TextEditor(text: $feedbackText)
+                        .frame(minHeight: 120)
+                        .overlay(
+                            Group {
+                                if feedbackText.isEmpty {
+                                    Text("Tell us what you think, what you love, or what could be better...")
+                                        .foregroundColor(.secondary)
+                                        .padding(.top, 8)
+                                        .padding(.leading, 4)
+                                        .allowsHitTesting(false)
+                                }
+                            },
+                            alignment: .topLeading
+                        )
+                }
+
+                Section("Attach a Screenshot (Optional)") {
+                    PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                        HStack {
+                            Image(systemName: "photo.badge.plus")
+                                .foregroundColor(.blue)
+                            Text(attachedImage == nil ? "Choose Screenshot or Data" : "Image Selected ✓")
+                                .foregroundColor(attachedImage == nil ? .primary : .green)
+                        }
+                    }
+                    .onChange(of: selectedPhotoItem) { _, newItem in
+                        Task {
+                            if let newItem,
+                               let data = try? await newItem.loadTransferable(type: Data.self),
+                               let image = UIImage(data: data) {
+                                attachedImage = image
+                            }
+                        }
+                    }
+
+                    if let image = attachedImage {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxHeight: 180)
+                            .cornerRadius(8)
+                    }
+                }
+
+                Section("Device Info (Auto-filled)") {
+                    LabeledContent("Device", value: deviceModel)
+                    LabeledContent("iOS Version", value: systemVersion)
+                    LabeledContent("App Version", value: appVersion)
+                }
+
+                Section {
+                    Button {
+                        submitFeedback()
+                    } label: {
+                        HStack {
+                            Spacer()
+                            if isSubmitting {
+                                ProgressView()
+                            } else {
+                                Text("Send Feedback")
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(.white)
+                            }
+                            Spacer()
+                        }
+                    }
+                    .listRowBackground(feedbackText.isEmpty ? Color.gray : Color.green)
+                    .disabled(feedbackText.isEmpty || isSubmitting)
+                }
+            }
+            .navigationTitle("Send Feedback")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            .alert("Thank You! 🎉", isPresented: $showConfirmation) {
+                Button("Close", role: .cancel) { dismiss() }
+            } message: {
+                Text("Your feedback has been sent to the Aeris team. We read every message and truly appreciate you taking the time. If your review is glowing, it may be featured on our website!")
+            }
+        }
+    }
+
+    private func submitFeedback() {
+        isSubmitting = true
+        let subject = "Aeris View Feedback – v\(appVersion)"
+        let nameInfo = userName.isEmpty ? "" : "Name: \(userName)\n"
+        let emailInfo = userEmail.isEmpty ? "" : "Email: \(userEmail)\n"
+        let body = """
+        \(nameInfo)\(emailInfo)
+        Feedback:
+        \(feedbackText)
+
+        ---
+        Device: \(deviceModel)
+        iOS: \(systemVersion)
+        App Version: \(appVersion)
+        """
+        let encodedSubject = subject.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let encodedBody = body.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let mailURLString = "mailto:support@getaeris.ca?subject=\(encodedSubject)&body=\(encodedBody)"
+        if let url = URL(string: mailURLString) {
+            UIApplication.shared.open(url) { _ in
+                isSubmitting = false
+                showConfirmation = true
+            }
+        } else {
+            isSubmitting = false
+        }
     }
 }
 
