@@ -17,7 +17,7 @@ struct DevicePairingView: View {
                         .font(.system(size: 80))
                         .foregroundColor(.blue)
                     
-                    Text("Pair Air Quality Sensor")
+                    Text("Pair Aeris View")
                         .font(.largeTitle)
                         .fontWeight(.bold)
                         .multilineTextAlignment(.center)
@@ -41,7 +41,7 @@ struct DevicePairingView: View {
                             .font(.headline)
                             .foregroundColor(.secondary)
                         
-                        Text("Tap scan to search for air quality sensors")
+                        Text("Tap scan to search for Aeris View devices")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }

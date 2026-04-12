@@ -104,7 +104,8 @@ struct SettingsView: View {
 private struct DeviceSettingsSectionView: View {
     @ObservedObject var bleManager: BLEManager
     var settings: UserSettings
-    
+    @Environment(\.modelContext) private var modelContext
+
     var body: some View {
         Section("Device Settings") {
             NavigationLink {
@@ -122,7 +123,7 @@ private struct DeviceSettingsSectionView: View {
                     color: .blue
                 )
             }
-            
+
             NavigationLink {
                 TemperatureUnitView(
                     settings: settings,
@@ -138,7 +139,7 @@ private struct DeviceSettingsSectionView: View {
                     color: .orange
                 )
             }
-            
+
             NavigationLink {
                 CO2ThresholdView(settings: settings)
             } label: {
@@ -147,6 +148,22 @@ private struct DeviceSettingsSectionView: View {
                     title: "CO2 Alert Threshold",
                     value: "\(Int(settings.co2AlertThreshold)) PPM",
                     color: .red
+                )
+            }
+
+            Toggle(isOn: Binding(
+                get: { settings.isSimpleDisplayMode },
+                set: { newValue in
+                    settings.isSimpleDisplayMode = newValue
+                    try? modelContext.save()
+                    bleManager.writeDisplayMode(newValue)
+                }
+            )) {
+                SettingsRow(
+                    icon: "rectangle.grid.1x2.fill",
+                    title: "Simple Display Mode",
+                    value: nil,
+                    color: .indigo
                 )
             }
         }

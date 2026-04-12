@@ -128,19 +128,22 @@ final class UserSettings: ObservableObject {
     var notificationsEnabled: Bool
     var userName: String
     var userEmail: String
-    
-    init(measurementInterval: Int = 300, 
-         temperatureUnit: TemperatureUnit = .celsius, 
+    var isSimpleDisplayMode: Bool
+
+    init(measurementInterval: Int = 300,
+         temperatureUnit: TemperatureUnit = .celsius,
          co2AlertThreshold: Double = 2000,
          notificationsEnabled: Bool = true,
          userName: String = "",
-         userEmail: String = "") {
+         userEmail: String = "",
+         isSimpleDisplayMode: Bool = false) {
         self.measurementInterval = measurementInterval
         self.temperatureUnit = temperatureUnit
         self.co2AlertThreshold = co2AlertThreshold
         self.notificationsEnabled = notificationsEnabled
         self.userName = userName
         self.userEmail = userEmail
+        self.isSimpleDisplayMode = isSimpleDisplayMode
     }
 }
 

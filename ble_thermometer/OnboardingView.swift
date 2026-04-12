@@ -11,7 +11,7 @@ struct OnboardingView: View {
             // Welcome Page
             OnboardingPage(
                 imageName: "leaf.fill",
-                title: "Welcome to Air Quality Monitor",
+                title: "Welcome to Aeris View",
                 description: "Monitor your indoor air quality with real-time CO2, temperature, and humidity readings.",
                 pageIndex: 0
             )

@@ -21,6 +21,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         var calibrationFinished: Bool = false
         var calibrationStatusMessage: String = ""
         var customName: String? = nil
+        var isSimpleDisplayMode: Bool = false
     }
 
     private enum SyncCompletionReason {
@@ -112,6 +113,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     let batteryLevelUUID = CBUUID(string: "2A19") // Battery Level Characteristic
     let calibrationCharUUID = CBUUID(string: "bf40623a-300b-4793-b4ad-7a9970f6732d") // CO2 Calibration Characteristic
     let syncDataCharUUID = CBUUID(string: "475f3487-c251-4fbe-b006-37eba1d6c42e") // Sync Data ID Characteristic
+    let displayModeCharUUID = CBUUID(string: "c9377172-d38c-41ee-9249-e5ebffb0c811") // Display Mode Characteristic
 
     override init() {
         super.init()
@@ -174,20 +176,21 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         characteristicNameCache[CBUUID(string: "2A00")] = "Device Name"
         characteristicNameCache[calibrationCharUUID] = "CO2 Calibration"
         characteristicNameCache[syncDataCharUUID] = "Sync Data"
+        characteristicNameCache[displayModeCharUUID] = "Display Mode"
     }
 
     func getCharacteristicName(uuid: CBUUID) -> String {
         return characteristicNameCache[uuid] ?? "Unknown Characteristic"
     }
 
-    // MARK: - Air Quality Device Detection
-    
-    /// Checks if a peripheral is an Air Quality sensor device
+    // MARK: - Aeris View Device Detection
+
+    /// Checks if a peripheral is an Aeris View sensor device
     /// - Parameter peripheral: The BLE peripheral to check
-    /// - Returns: True if the device name starts with "Air Quality"
+    /// - Returns: True if the device name starts with "Aeris View"
     func isAirQualityDevice(_ peripheral: CBPeripheral) -> Bool {
         guard let name = peripheral.name else { return false }
-        return name.hasPrefix("Air Quality")
+        return name.hasPrefix("Aeris View")
     }
 
     // MARK: - Scanning
@@ -204,8 +207,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         centralManager.scanForPeripherals(withServices: nil, options: [
             CBCentralManagerScanOptionAllowDuplicatesKey: false
         ])
-        print("🔍 Scanning started - prioritizing Air Quality devices")
-        print("📡 Looking for devices with names starting with 'Air Quality'")
+        print("🔍 Scanning started - prioritizing Aeris View devices")
+        print("📡 Looking for devices with names starting with 'Aeris View'")
     }
 
     func stopScan() {
@@ -293,9 +296,9 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         let serviceInfo = advertisedServices.isEmpty ? "No services advertised" : "Services: \(advertisedServices.map { $0.uuidString }.joined(separator: ", "))"
         print("🔍 Discovered: \(deviceName) | RSSI: \(RSSI) | \(serviceInfo)")
         
-        // Check if this is an Air Quality device using helper function
+        // Check if this is an Aeris View device using helper function
         let isAirQuality = isAirQualityDevice(peripheral)
-        
+
         // Add device to list with size limit to prevent memory issues
         if isAirQuality && !peripherals.contains(peripheral) {
             // Limit the number of peripherals to prevent memory bloat
@@ -303,7 +306,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                 peripherals.removeFirst(10) // Remove oldest 10 when limit reached
             }
             peripherals.append(peripheral)
-            print("Air Quality device added: \(deviceName)")
+            print("Aeris View device added: \(deviceName)")
         } else {
             print("Skipped device")
         }
@@ -434,12 +437,14 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             }
 
             if characteristic.uuid == measurementIntervalUUID {
-                // Read the measurement interval characteristic
                 peripheral.readValue(for: characteristic)
             }
-            
+
             if characteristic.uuid == tempUnitCharUUID {
-                // Read the temperature unit characteristic
+                peripheral.readValue(for: characteristic)
+            }
+
+            if characteristic.uuid == displayModeCharUUID {
                 peripheral.readValue(for: characteristic)
             }
         }
@@ -518,13 +523,36 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         case tempUnitCharUUID:
             print("Temperature unit updated: \(stringValue)")
             if let tempUnit = decodeTemperatureUnit(from: stringValue) {
-                snapshot.isCelsius = (tempUnit == 0)
+                let isCelsius = (tempUnit == 0)
+                snapshot.isCelsius = isCelsius
+                snapshot.temperatureUnit = isCelsius ? .celsius : .fahrenheit
                 if peripheral.identifier == activePeripheral?.identifier {
-                    isTempCelsius = (tempUnit == 0)
-                    print("Temperature unit set to \(isTempCelsius ? "Celsius" : "Fahrenheit")")
+                    isTempCelsius = isCelsius
+                    print("Temperature unit set to \(isCelsius ? "Celsius" : "Fahrenheit")")
+
+                    if let settings = userSettings {
+                        settings.temperatureUnit = isCelsius ? .celsius : .fahrenheit
+                        try? modelContext?.save()
+                        print("📱 UserSettings temperature unit updated to \(isCelsius ? "Celsius" : "Fahrenheit")")
+                    }
                 }
             } else {
                 print("Failed to decode temperature unit from: \(stringValue)")
+            }
+        case displayModeCharUUID:
+            print("Display mode updated: \(stringValue)")
+            if data.count >= 1 {
+                let isSimple = data[0] == 1
+                snapshot.isSimpleDisplayMode = isSimple
+                if peripheral.identifier == activePeripheral?.identifier {
+                    if let settings = userSettings {
+                        settings.isSimpleDisplayMode = isSimple
+                        try? modelContext?.save()
+                        print("📱 UserSettings display mode updated to \(isSimple ? "simple" : "default")")
+                    }
+                }
+            } else {
+                print("Failed to decode display mode from: \(stringValue)")
             }
         case calibrationCharUUID:
             // Device sends 0x01 when calibration finishes
@@ -615,16 +643,18 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         print("🔗 Bonded to device: \(peripheral.name ?? "Unknown")")
     }
     
-    /// Enable live data notifications after sync data notifications are established
+    /// Enable live data notifications after sync data notifications are established,
+    /// and read config characteristics to sync device state into the app UI.
     private func enableLiveDataNotifications(for peripheral: CBPeripheral) {
         guard let services = peripheral.services else {
             print("⚠️ Services not discovered yet for live data notifications")
             return
         }
-        
+
         for service in services {
             guard let characteristics = service.characteristics else { continue }
             for characteristic in characteristics {
+                // Enable notifications for live data characteristics
                 if characteristic.uuid == co2CharUUID ||
                     characteristic.uuid == tempCharUUID ||
                     characteristic.uuid == humCharUUID ||
@@ -632,6 +662,14 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
                     characteristic.uuid == calibrationCharUUID {
                     peripheral.setNotifyValue(true, for: characteristic)
                     print("🔔 Enabled notifications for \(getCharacteristicName(uuid: characteristic.uuid))")
+                }
+
+                // Read config characteristics so the app UI stays in sync with the device
+                if characteristic.uuid == measurementIntervalUUID ||
+                    characteristic.uuid == tempUnitCharUUID ||
+                    characteristic.uuid == displayModeCharUUID {
+                    peripheral.readValue(for: characteristic)
+                    print("📖 Reading \(getCharacteristicName(uuid: characteristic.uuid)) from device")
                 }
             }
         }
@@ -777,21 +815,21 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         return data[0]
     }
     
-    /// Automatically connects to the first Air Quality device found
-    /// - Returns: True if an Air Quality device was found and connection initiated
+    /// Automatically connects to the first Aeris View device found
+    /// - Returns: True if an Aeris View device was found and connection initiated
     func connectToFirstAirQualityDevice() -> Bool {
         guard let airQualityDevice = peripherals.first(where: { isAirQualityDevice($0) }) else {
-            print("❌ No Air Quality devices found in scan results")
+            print("❌ No Aeris View devices found in scan results")
             return false
         }
-        
-        print("🎯 Auto-connecting to Air Quality device: \(airQualityDevice.name ?? "Unknown")")
+
+        print("🎯 Auto-connecting to Aeris View device: \(airQualityDevice.name ?? "Unknown")")
         connect(peripheral: airQualityDevice)
         return true
     }
-    
-    /// Gets all Air Quality devices from the current scan results
-    /// - Returns: Array of Air Quality device peripherals
+
+    /// Gets all Aeris View devices from the current scan results
+    /// - Returns: Array of Aeris View device peripherals
     func getAirQualityDevices() -> [CBPeripheral] {
         return peripherals.filter { isAirQualityDevice($0) }
     }
@@ -876,6 +914,31 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             }
         }
         print("❌ Temperature unit characteristic not found")
+    }
+
+    /// Writes display mode to the connected BLE device (0 = default, 1 = simple)
+    func writeDisplayMode(_ isSimple: Bool) {
+        let target = activePeripheral ?? connectedPeripheral
+        guard let peripheral = target,
+              peripheral.state == .connected else {
+            print("No connected peripheral to write display mode")
+            return
+        }
+
+        guard let services = peripheral.services else { return }
+        for service in services {
+            guard let characteristics = service.characteristics else { continue }
+            for characteristic in characteristics {
+                if characteristic.uuid == displayModeCharUUID {
+                    let modeValue: UInt8 = isSimple ? 1 : 0
+                    let data = Data([modeValue])
+                    writeValue(for: characteristic, of: peripheral, value: data)
+                    print("📝 Writing display mode: \(isSimple ? "simple" : "default")")
+                    return
+                }
+            }
+        }
+        print("❌ Display mode characteristic not found")
     }
 
     /// Starts CO2 calibration by writing the reference PPM to the calibration characteristic
@@ -1005,7 +1068,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         if let active = activePeripheral {
             return displayName(for: active)
         }
-        return "Air Quality"
+        return "Aeris View"
     }
     
     /// Returns the display name for a peripheral: custom name > BLE name > "Device N"
