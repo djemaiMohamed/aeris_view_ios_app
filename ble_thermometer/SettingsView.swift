@@ -437,7 +437,7 @@ private struct AboutSectionView: View {
             SettingsRow(
                 icon: "info.circle.fill",
                 title: "Version",
-                value: "1.0.0",
+                value: "1.0.1",
                 color: .gray
             )
             
