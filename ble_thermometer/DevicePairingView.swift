@@ -7,7 +7,7 @@ struct DevicePairingView: View {
     var autoStartScan: Bool = false
     var onEnableDemoMode: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
-    
+
     var body: some View {
         NavigationView {
             VStack(spacing: 30) {
@@ -16,12 +16,12 @@ struct DevicePairingView: View {
                     Image(systemName: "sensor.tag.radiowaves.forward.fill")
                         .font(.system(size: 80))
                         .foregroundColor(.blue)
-                    
+
                     Text("Pair Aeris View")
                         .font(.largeTitle)
                         .fontWeight(.bold)
                         .multilineTextAlignment(.center)
-                    
+
                     Text("Make sure your sensor is in pairing mode and nearby.")
                         .font(.body)
                         .foregroundColor(.secondary)
@@ -29,18 +29,45 @@ struct DevicePairingView: View {
                         .padding(.horizontal)
                 }
                 .padding(.top, 40)
-                
+
+                // Connection status banner — shown while a connect attempt is in flight
+                if bleManager.isConnecting, let target = bleManager.connectingPeripheral {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Waiting for device to respond…")
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                            Text(target.name ?? "Unknown Device")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(Color.orange.opacity(0.12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.orange.opacity(0.35), lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .padding(.horizontal)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .animation(.easeInOut(duration: 0.25), value: bleManager.isConnecting)
+                }
+
                 // Device List
                 if bleManager.peripherals.isEmpty && !isScanning {
                     VStack(spacing: 20) {
                         Image(systemName: "magnifyingglass")
                             .font(.system(size: 50))
                             .foregroundColor(.gray)
-                        
+
                         Text("No devices found")
                             .font(.headline)
                             .foregroundColor(.secondary)
-                        
+
                         Text("Tap scan to search for Aeris View devices")
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -50,14 +77,13 @@ struct DevicePairingView: View {
                     VStack(spacing: 20) {
                         ProgressView()
                             .scaleEffect(1.5)
-                        
+
                         Text("Scanning for devices...")
                             .font(.headline)
                             .foregroundColor(.secondary)
                     }
                     .padding()
                 } else {
-                    // Show scanning indicator above the list while still scanning
                     if isScanning {
                         HStack(spacing: 8) {
                             ProgressView()
@@ -73,7 +99,8 @@ struct DevicePairingView: View {
                         ForEach(bleManager.peripherals, id: \.identifier) { peripheral in
                             DeviceRow(
                                 peripheral: peripheral,
-                                isConnecting: bleManager.isConnecting && bleManager.connectedPeripheral?.identifier == peripheral.identifier,
+                                isThisConnecting: bleManager.connectingPeripheral?.identifier == peripheral.identifier,
+                                isAnyConnecting: bleManager.isConnecting,
                                 onTap: {
                                     bleManager.connect(peripheral: peripheral)
                                 },
@@ -83,9 +110,9 @@ struct DevicePairingView: View {
                     }
                     .listStyle(InsetGroupedListStyle())
                 }
-                
+
                 Spacer()
-                
+
                 // Scan Button
                 Button(action: {
                     if isScanning {
@@ -94,8 +121,7 @@ struct DevicePairingView: View {
                     } else {
                         bleManager.startScan()
                         isScanning = true
-                        
-                        // Auto-stop scanning after 30 seconds
+
                         DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
                             if isScanning {
                                 bleManager.stopScan()
@@ -150,7 +176,6 @@ struct DevicePairingView: View {
             }
             .onChange(of: bleManager.connectedPeripheral) { newValue in
                 if newValue != nil {
-                    // Stop scanning and dismiss after brief delay
                     if isScanning {
                         bleManager.stopScan()
                         isScanning = false
@@ -166,46 +191,77 @@ struct DevicePairingView: View {
 
 struct DeviceRow: View {
     let peripheral: CBPeripheral
-    let isConnecting: Bool
+    let isThisConnecting: Bool
+    let isAnyConnecting: Bool
     let onTap: () -> Void
     @ObservedObject var bleManager: BLEManager
-    
+
+    var deviceName: String {
+        bleManager.customDeviceNames[peripheral.identifier.uuidString]
+            ?? peripheral.name
+            ?? "Unknown Device"
+    }
+
     var body: some View {
-        Button(action: onTap) {
-            HStack {
+        HStack(spacing: 14) {
+            // Device icon
+            ZStack {
+                Circle()
+                    .fill(Color.blue.opacity(0.12))
+                    .frame(width: 44, height: 44)
                 Image(systemName: "sensor.fill")
                     .foregroundColor(.blue)
-                    .font(.title2)
-                
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(peripheral.name ?? "Unknown Device")
-                        .font(.headline)
-                        .foregroundColor(.primary)
-                    
-                    Text(peripheral.identifier.uuidString.prefix(8) + "...")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                
-                Spacer()
-                
-                if isConnecting {
-                    HStack(spacing: 6) {
-                        ProgressView()
-                            .scaleEffect(0.8)
-                        Text("Connecting...")
-                            .font(.caption)
-                            .foregroundColor(.orange)
-                    }
-                } else {
-                    Text("Tap to connect")
-                        .font(.caption)
-                        .foregroundColor(.blue)
-                }
+                    .font(.system(size: 20))
             }
-            .padding(.vertical, 8)
+
+            // Device info
+            VStack(alignment: .leading, spacing: 3) {
+                Text(deviceName)
+                    .font(.headline)
+                    .foregroundColor(.primary)
+                Text(peripheral.identifier.uuidString.prefix(8) + "…")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            // Action area
+            if isThisConnecting {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .scaleEffect(0.75)
+                    Text("Waiting…")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundColor(.orange)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Color.orange.opacity(0.12))
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(Color.orange.opacity(0.4), lineWidth: 1))
+            } else {
+                Button(action: onTap) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "bolt.fill")
+                            .font(.caption.weight(.semibold))
+                        Text("Connect")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(isAnyConnecting ? Color.gray.opacity(0.5) : Color.blue)
+                    .clipShape(Capsule())
+                }
+                .disabled(isAnyConnecting)
+                .buttonStyle(.plain)
+            }
         }
-        .disabled(isConnecting)
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
     }
 }
 

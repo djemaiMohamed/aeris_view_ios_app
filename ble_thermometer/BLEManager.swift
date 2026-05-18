@@ -56,6 +56,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     @Published var measurementInterval: Int = 300 // Measurement interval in seconds
     @Published var isTempCelsius: Bool = true // Temperature unit flag
     @Published var isConnecting: Bool = false
+    @Published var connectingPeripheral: CBPeripheral? = nil
     @Published var connectionStatus: String = "Disconnected"
     @Published var airQualityLevel: AirQualityLevel = .excellent
     @Published var lastUpdateTime: Date = Date()
@@ -101,6 +102,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     private let notificationCooldownPeriod: TimeInterval = 300 // 5 minutes
     private var syncNotificationsPendingSetup: Set<CBUUID> = [] // Track which characteristics need notifications after sync setup
     private var syncDataNotificationsEnabled: [CBPeripheral: Bool] = [:] // Track sync data notification state per device
+    private var syncNotifyRetryCount: [CBPeripheral: Int] = [:] // Retry counter for CCCD setup after pairing
 
     // Replace these UUIDs with your actual service and characteristic UUIDs
     let targetServiceUUID = CBUUID(string: "1809")
@@ -221,6 +223,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     // MARK: - Connection
     func connect(peripheral: CBPeripheral) {
         isConnecting = true
+        connectingPeripheral = peripheral
         connectionStatus = "Connecting..."
         peripheral.delegate = self
         centralManager.connect(peripheral, options: [CBConnectPeripheralOptionNotifyOnConnectionKey: true])
@@ -320,6 +323,7 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             }
             if self.activePeripheral == nil { self.activePeripheral = peripheral }
             self.isConnecting = false
+            self.connectingPeripheral = nil
             self.connectionStatus = "Connected"
             peripheral.discoverServices(nil) // discover all services to find custom calibration characteristic
             print("🔗 Connected to \(peripheral.name ?? "Unknown Device")")
@@ -330,14 +334,17 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
         DispatchQueue.main.async {
             self.connectedPeripheral = nil
             self.isConnecting = false
+            self.connectingPeripheral = nil
             self.connectionStatus = "Disconnected"
             self.connectedPeripherals.removeAll { $0.identifier == peripheral.identifier }
             if self.activePeripheral?.identifier == peripheral.identifier {
                 self.activePeripheral = self.connectedPeripherals.first
             }
             
-            // Clean up completion handlers for this peripheral
+            // Clean up completion handlers and CCCD retry state for this peripheral
             self.readValueCompletion.removeAll()
+            self.syncDataNotificationsEnabled[peripheral] = false
+            self.syncNotifyRetryCount[peripheral] = 0
             
             // Cancel any ongoing sync if device disconnects during sync
             if self.syncState.isSyncing {
@@ -618,6 +625,21 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
             print("❌ Error updating notification state for \(characteristic.uuid): \(error.localizedDescription)")
+            if characteristic.uuid == syncDataCharUUID {
+                let attempt = (syncNotifyRetryCount[peripheral] ?? 0) + 1
+                syncNotifyRetryCount[peripheral] = attempt
+                // Retry up to 8 times at 3-second intervals (~24 s window).
+                // This covers the typical passkey-entry time so at least one retry
+                // fires after pairing completes and the CCCD write can succeed.
+                if attempt <= 8 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                        guard let self = self, peripheral.state == .connected else { return }
+                        guard self.syncDataNotificationsEnabled[peripheral] != true else { return }
+                        print("🔄 Retrying CCCD setup for sync data (\(attempt)/8)")
+                        peripheral.setNotifyValue(true, for: characteristic)
+                    }
+                }
+            }
             return
         }
         
@@ -625,7 +647,8 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             if characteristic.isNotifying {
                 print("✅ Sync data notifications successfully enabled")
                 syncDataNotificationsEnabled[peripheral] = true
-                
+                syncNotifyRetryCount[peripheral] = 0  // stop further retries
+
                 // Now enable live data notifications after sync data is confirmed
                 enableLiveDataNotifications(for: peripheral)
             } else {
@@ -1220,10 +1243,19 @@ class BLEManager: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeriph
             return
         }
 
-        guard syncDataNotificationsEnabled[peripheral] == true else {
-            print("❌ Sync data indications are not enabled; cannot start sync")
+        if syncDataNotificationsEnabled[peripheral] != true {
+            // CCCD not yet confirmed — try to re-arm it and ask the user to retry.
+            print("⚠️ Sync data CCCD not confirmed; attempting to re-enable notifications")
+            if let services = peripheral.services {
+                for service in services {
+                    guard let characteristics = service.characteristics else { continue }
+                    for characteristic in characteristics where characteristic.uuid == syncDataCharUUID {
+                        peripheral.setNotifyValue(true, for: characteristic)
+                    }
+                }
+            }
             DispatchQueue.main.async {
-                self.syncState = .failed(message: "Enable sync indications before syncing")
+                self.syncState = .failed(message: "Sync channel not ready — please try again in a moment")
             }
             return
         }
