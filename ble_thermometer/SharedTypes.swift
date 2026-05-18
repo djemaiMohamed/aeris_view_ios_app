@@ -42,11 +42,16 @@ final class SensorReading {
     var temperature: Double
     var humidity: Double
     var isCelsius: Bool
-    // Multi-device support: tag each reading with the device identifier and optional name
     var deviceId: String = ""
     var deviceName: String = ""
-    
-    init(timestamp: Date = Date(), co2Value: Double, temperature: Double, humidity: Double, isCelsius: Bool = true, deviceId: String = "", deviceName: String = "") {
+    // v2 sync protocol fields — SwiftData lightweight migration sets these to -1 on old rows.
+    // sequenceId=-1 means the record pre-dates the v2 protocol and has no dedup key.
+    var sequenceId: Int64 = -1
+    var bootCount: Int = -1
+
+    init(timestamp: Date = Date(), co2Value: Double, temperature: Double, humidity: Double,
+         isCelsius: Bool = true, deviceId: String = "", deviceName: String = "",
+         sequenceId: Int64 = -1, bootCount: Int = -1) {
         self.timestamp = timestamp
         self.co2Value = co2Value
         self.temperature = temperature
@@ -54,6 +59,8 @@ final class SensorReading {
         self.isCelsius = isCelsius
         self.deviceId = deviceId
         self.deviceName = deviceName
+        self.sequenceId = sequenceId
+        self.bootCount = bootCount
     }
 }
 
@@ -82,18 +89,27 @@ struct SensorSample {
     let co2: Int
     let temperatureCentiDegrees: Int   // Celsius raw value, divide by 100 for display
     let humidity: Int                  // Whole percentage
-    let battery: Int                   // Battery percentage (for live and sync data frames)
+    let battery: Int                   // Battery percentage
     let frameType: SyncFrameType
-    
-    var isLive: Bool {
-        return frameType == .live
+    // v2 protocol fields
+    let sequenceId: UInt32             // Monotonic device seq_id; 0 = unknown (pre-v2 or live)
+    let bootCount: Int                 // Device boot generation when sample was saved
+
+    init(timestamp: Date, co2: Int, temperatureCentiDegrees: Int, humidity: Int,
+         battery: Int, frameType: SyncFrameType, sequenceId: UInt32 = 0, bootCount: Int = -1) {
+        self.timestamp = timestamp
+        self.co2 = co2
+        self.temperatureCentiDegrees = temperatureCentiDegrees
+        self.humidity = humidity
+        self.battery = battery
+        self.frameType = frameType
+        self.sequenceId = sequenceId
+        self.bootCount = bootCount
     }
-    
-    var isSyncData: Bool {
-        return frameType == .syncData
-    }
-    
-    /// Convert to SensorReading for database storage
+
+    var isLive: Bool { frameType == .live }
+    var isSyncData: Bool { frameType == .syncData }
+
     func toSensorReading(deviceId: String = "", deviceName: String = "") -> SensorReading {
         return SensorReading(
             timestamp: timestamp,
@@ -102,7 +118,9 @@ struct SensorSample {
             humidity: Double(humidity),
             isCelsius: true,
             deviceId: deviceId,
-            deviceName: deviceName
+            deviceName: deviceName,
+            sequenceId: Int64(sequenceId),
+            bootCount: bootCount
         )
     }
 }
